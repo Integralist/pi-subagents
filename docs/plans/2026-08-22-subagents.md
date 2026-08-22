@@ -124,7 +124,7 @@ That has a direct consequence for how the work is handed out.
   behaviour is read but unverified. Expect to correct this plan as reality
   lands.
 
-- [ ] **Task 1.1**: Initialise the repository.
+- [x] **Task 1.1**: Initialise the repository.
 
   ```bash
   cd /Users/mmcdonnell/code/pi-subagents
