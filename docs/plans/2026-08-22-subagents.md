@@ -481,12 +481,37 @@ That has a direct consequence for how the work is handed out.
   > under the sandbox used here, so the live check has to run outside
   > it.
 
-- [ ] **Task 1.8**: Tests at the tool boundary.
+- [x] **Task 1.8**: Tests at the tool boundary.
 
   Build a fake `ExtensionContext` and inject a stubbed session factory.
   Cover: inherits parent model and effort; unknown subagent type is
   refused with the list of known types; a throwing session yields a
   failed outcome; the parent is unaffected.
+
+  Two depths of tool-boundary test, and the distinction matters:
+
+  - `test/index.test.ts` stubs `runSubagent` itself, to test the tool's
+    own decisions — which agent, which allowlist, which refusal.
+  - `test/tool-boundary.test.ts` wires the **real** runner and stubs
+    only the session factory, which is what this task asks for. Its
+    `describe` / `it` names quote the specification's scenarios
+    verbatim.
+
+  All four required cases are covered, three of them end to end.
+  "Leaves sibling subagents working" is included as far as Slice 1
+  reaches — two overlapping runs, one failing — with real concurrency
+  left to Slice 3.
+
+  > [!IMPORTANT]
+  > **The full-stack test found a wording defect the shallow ones could
+  > not.** Both the runner and the tool named the agent, so a contained
+  > crash read `The "reviewer" subagent failed: subagent "reviewer"
+  > failed: no model configured`, while a *provider* error named it only
+  > once because the runner did not prefix that path. Fixed by one
+  > invariant: **an outcome's `error` always names its agent**, built by
+  > a single `failureReason` helper, and the tool reports it verbatim.
+  > This changed the Task 1.5 assertion that pinned the old
+  > provider-error wording.
 
 ### Slice 2: Model and effort overrides with fuzzy name resolution
 

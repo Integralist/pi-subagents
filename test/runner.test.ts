@@ -190,7 +190,10 @@ describe("runSubagent", () => {
 		});
 
 		expect(outcome.status).toBe("failed");
-		expect(outcome.error).toBe("the provider refused");
+		// Every outcome error names its agent, whatever the cause, so a caller
+		// can report it verbatim without prefixing.
+		expect(outcome.error).toContain("the provider refused");
+		expect(outcome.error).toContain("reviewer");
 	});
 
 	it("reports an aborted reply as stopped", async () => {

@@ -88,7 +88,7 @@ export class SubagentError extends Error {
 		readonly agentName: string,
 		cause: unknown,
 	) {
-		super(`subagent "${agentName}" failed: ${describeCause(cause)}`, { cause });
+		super(failureReason(agentName, describeCause(cause)), { cause });
 		this.name = "SubagentError";
 	}
 }
@@ -164,19 +164,34 @@ function lastAssistantReply(messages: unknown[]): AssistantReply | undefined {
 }
 
 /**
+ * The one shape a failure reason takes.
+ *
+ * Every `error` on an outcome names its agent, whatever the cause — a thrown
+ * error, a provider error, or an empty reply. Callers can then report the
+ * reason verbatim instead of prefixing it themselves, which is what produced
+ * `The "reviewer" subagent failed: subagent "reviewer" failed: ...`.
+ */
+function failureReason(agentName: string, reason: string): string {
+	return `subagent "${agentName}" failed: ${reason}`;
+}
+
+/**
  * Read an outcome off the finished transcript.
  *
  * The provider's own `stopReason` decides the status, so a subagent that was
  * interrupted is reported as stopped rather than as a short success, and one
  * whose provider errored carries that message back to the caller.
  */
-function summariseOutcome(messages: unknown[]): SubagentOutcome {
+function summariseOutcome(
+	agentName: string,
+	messages: unknown[],
+): SubagentOutcome {
 	const reply = lastAssistantReply(messages);
 	if (!reply) {
 		return {
 			status: "failed",
 			output: "",
-			error: "the subagent finished without a reply",
+			error: failureReason(agentName, "it finished without a reply"),
 		};
 	}
 
@@ -189,7 +204,10 @@ function summariseOutcome(messages: unknown[]): SubagentOutcome {
 		return {
 			status: "failed",
 			output,
-			error: reply.errorMessage ?? "the subagent's model reported an error",
+			error: failureReason(
+				agentName,
+				reply.errorMessage ?? "its model reported an error",
+			),
 		};
 	}
 	return { status: "completed", output };
@@ -283,7 +301,7 @@ async function runSubagentUnguarded(
 
 	try {
 		await session.prompt(prompt);
-		return summariseOutcome(session.messages);
+		return summariseOutcome(config.name, session.messages);
 	} finally {
 		signal?.removeEventListener("abort", onAbort);
 		// Teardown must not decide the outcome. A `dispose()` that throws would

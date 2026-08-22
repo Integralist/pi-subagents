@@ -106,8 +106,11 @@ function describeOutcome(
 	}
 
 	if (outcome.status === "failed") {
+		// Reported verbatim: an outcome's `error` already names its agent, so
+		// prefixing here would say "reviewer" twice.
 		parts.push(
-			`The "${agentName}" subagent failed: ${outcome.error ?? "no reason given"}`,
+			outcome.error ??
+				`The "${agentName}" subagent failed for no stated reason.`,
 		);
 	} else if (outcome.status === "stopped") {
 		parts.push(`The "${agentName}" subagent was stopped before finishing.`);
