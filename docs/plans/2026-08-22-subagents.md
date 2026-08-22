@@ -1937,54 +1937,118 @@ That has a direct consequence for how the work is handed out.
 > and the user has confirmed that spawn-time selection covers the common
 > case.
 
+> [!IMPORTANT]
+> **Dropped, on the user's decision, with Slices 1 to 11 delivered.**
+> Nothing else depends on it and spawn-time selection covers the common
+> case: `spawn_subagent` takes a `model`, an agent file can name one, and
+> both go through the same `resolveModel`. Neither task was started, so
+> `src/index.ts` registers no `/subagent-model` command and the viewer
+> has no model key.
+>
+> Retargeting a live subagent stays possible later — the record holds the
+> session and `turns.ts` already watches `turn_end`, which is where a
+> pending model would be applied — but it would need its own slice.
+
 ### Documentation
 
-- [ ] Write `README.md`: install, the four tools, agent file format,
+- [x] Write `README.md`: install, the four tools, agent file format,
   the list and its keys, `@name` routing, settings.
-- [ ] Write `CONTEXT.md` recording the ubiquitous language — subagent,
+- [x] Write `CONTEXT.md` recording the ubiquitous language — subagent,
   handle, record, registry, the subagent list, viewer, steer, wrap-up.
-- [ ] Add example agent definitions under `agents/`.
+- [x] Add example agent definitions under `agents/`.
+
+> [!NOTE]
+> **A `Makefile` was added alongside these**, at the user's request and
+> in line with their standing preference for `make test` over remembered
+> incantations. `make` lists the targets; `make verify` is the four
+> checks below in one command. Two of its targets are more than
+> shorthand:
+>
+> - `make load-check` runs `scripts/load-check.mjs`, the jiti check that
+>   was being recreated by hand every slice. It is the only check that
+>   `.ts`-suffixed imports and `src/ui/` resolve under pi's own loader
+>   rather than vitest's.
+> - `make agents` copies the shipped examples into `.pi/agents/`, which
+>   is not automatic: pi's package manager collects `skills` from a
+>   package but has no notion of agents
+>   (`core/package-manager.js:1993`), and this extension reads only
+>   `<agentDir>/agents/` and `<project>/.pi/agents/`.
+>
+> **The example agents name only tools pi really has** — `read`, `bash`,
+> `edit`, `write`, `grep`, `find`, `ls`, confirmed against `pi --help`.
+> `scribe` shows `model:` commented out on purpose: a name matching
+> nothing refuses the spawn, and a shipped example must not break for
+> someone without that model.
 
 ### Verification
 
-- [ ] `npx vitest run` passes.
-- [ ] `npx tsc --noEmit` passes.
-- [ ] `npx biome check src/ test/` passes.
+- [x] `npx vitest run` passes — 518 tests. `make test`.
+- [x] `npx tsc --noEmit` passes. `make typecheck`.
+- [x] `npx biome check src/ test/` passes. `make lint`.
 - [ ] Load into a real session with `pi -e ./src/index.ts` and walk
   each acceptance scenario by hand — spawn several subagents, watch
   the list split into two columns past five, navigate it, open one,
   steer it, stop another, and address one with `@name`.
-- [ ] All spec acceptance criteria hold, each scenario matched by a
+- [x] All spec acceptance criteria hold, each scenario matched by a
   `vitest` test quoting its name.
+
+> [!WARNING]
+> **The interactive walkthrough is the one item still open, and it needs
+> a human at a terminal.** What was verified from here:
+>
+> - The extension loads under pi's own loader (`make load-check`).
+> - A real `pi -p … -e ./src/index.ts` process loads and registers it
+>   with no extension error, getting as far as the model check before
+>   stopping on "No API key found". Credentials and the network are both
+>   outside the agent sandbox, and pi cannot even lock
+>   `~/.pi/agent/settings.json` there.
+> - All 38 specification scenarios are quoted verbatim by a test, which
+>   an audit script checks rather than a reading of the list.
+>
+> What that leaves unproven is everything only a terminal shows: whether
+> the list *looks* right below the prompt, whether arrow keys feel right,
+> whether the viewer's panel reads well over a live session. `make try`
+> is the command; the walkthrough above is the script.
+>
+> **The scenario audit found nine tests that covered a scenario under a
+> different name**, which the checklist's own wording ("quoting its
+> name") had not been held to. Those were renamed, and two scenarios had
+> no test at all: "Returns the wrap-up answer" — a warned subagent
+> finishing normally, which nothing asserted — and "Keeps a finished
+> subagent's conversation", whose file-on-disk claim was implied by the
+> session-manager tests but never checked with `existsSync`. Both are
+> now tested.
 
 ## File Changes
 
-| File                      | Change                                     |
-| ------------------------- | ------------------------------------------ |
-| `package.json`            | New — Pi manifest, peer deps, scripts      |
-| `tsconfig.json`           | New — TypeScript config                    |
-| `biome.json`              | New — lint and format config               |
-| `vitest.config.ts`        | New — test config                          |
-| `.gitignore`              | New                                        |
-| `src/index.ts`            | New — factory, tool and event registration |
-| `src/agents.ts`           | New — agent file discovery                 |
-| `src/runner.ts`           | New — nested session creation, crash guard |
-| `src/registry.ts`         | New — records, status, context tracking    |
-| `src/spawn.ts`            | New — detached runs, completion notices    |
-| `src/queue.ts`            | New — concurrency limit                    |
-| `src/turns.ts`            | New — turn counting, warning, hard stop    |
-| `src/control.ts`          | New — steer and stop                       |
-| `src/model-resolver.ts`   | New — fuzzy model matching                 |
-| `src/colors.ts`           | New — palette assignment                   |
-| `src/mention.ts`          | New — handles and `@name` parsing          |
-| `src/ui/layout.ts`        | New — column splitting                     |
-| `src/ui/subagent-list.ts` | New — the list and its key handling        |
-| `src/ui/status.ts`        | New — one glyph and colour per status       |
-| `src/ui/transcript.ts`    | New — child messages as pi's components     |
+| File                        | Change                                                        |
+| --------------------------- | ------------------------------------------------------------- |
+| `package.json`              | New — Pi manifest, peer deps, scripts                         |
+| `tsconfig.json`             | New — TypeScript config                                       |
+| `biome.json`                | New — lint and format config                                  |
+| `vitest.config.ts`          | New — test config                                             |
+| `.gitignore`                | New                                                           |
+| `src/index.ts`              | New — factory, tool and event registration                    |
+| `src/agents.ts`             | New — agent file discovery                                    |
+| `src/runner.ts`             | New — nested session creation, crash guard                    |
+| `src/registry.ts`           | New — records, status, context tracking                       |
+| `src/spawn.ts`              | New — detached runs, completion notices                       |
+| `src/queue.ts`              | New — concurrency limit                                       |
+| `src/turns.ts`              | New — turn counting, warning, hard stop                       |
+| `src/control.ts`            | New — steer and stop                                          |
+| `src/model-resolver.ts`     | New — fuzzy model matching                                    |
+| `src/colors.ts`             | New — palette assignment                                      |
+| `src/mention.ts`            | New — handles and `@name` parsing                             |
+| `src/ui/layout.ts`          | New — column splitting                                        |
+| `src/ui/subagent-list.ts`   | New — the list and its key handling                           |
+| `src/ui/status.ts`          | New — one glyph and colour per status                         |
+| `src/ui/transcript.ts`      | New — child messages as pi's components                       |
 | `src/ui/subagent-viewer.ts` | New — live conversation view (was `viewer.ts` in this sketch) |
-| `test/*.test.ts`          | New — one file per seam plus unit tests    |
-| `agents/*.md`             | New — example agent definitions            |
-| `README.md`, `CONTEXT.md` | New                                        |
+| `test/*.test.ts`            | New — one file per seam plus unit tests                       |
+| `Makefile`                  | New — test, typecheck, lint, load-check                       |
+| `scripts/load-check.mjs`    | New — loads the extension as pi loads it                      |
+| `agents/*.md`               | New — example agent definitions                               |
+| `README.md`, `CONTEXT.md`   | New                                                           |
 
 ## Parallel Execution
 

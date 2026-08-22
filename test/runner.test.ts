@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -737,6 +737,49 @@ describe("runSubagent session handover", () => {
 		expect(seen).toHaveLength(1);
 		expect(seen[0]).toBe(stub.calls[0]?.sessionManager?.getSessionFile());
 		expect(seen[0]).toContain(sessionDir);
+	});
+});
+
+/**
+ * Persistence, as the specification promises it: a finished subagent's
+ * conversation is on disk, which is what makes continuing one possible at all.
+ */
+describe("runSubagent persistence", () => {
+	// The specification's scenario, quoted.
+	it("Keeps a finished subagent's conversation", async () => {
+		const sessionDir = tempSessionDir();
+		// Pi withholds the file until an assistant message exists, so the stub
+		// writes the exchange a real child session would have written.
+		let stub: ReturnType<typeof stubFactory>;
+		stub = stubFactory({
+			onPrompt: () => {
+				const manager = stub.calls[0]?.sessionManager;
+				manager?.appendMessage({
+					role: "user",
+					content: "review this",
+					timestamp: Date.now(),
+				});
+				manager?.appendMessage(
+					assistant("looks fine") as unknown as Parameters<
+						NonNullable<typeof manager>["appendMessage"]
+					>[0],
+				);
+			},
+		});
+
+		const outcome = await run({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			sessionDir,
+			createSession: stub.createSession,
+		});
+
+		expect(outcome.status).toBe("completed");
+		const file = stub.calls[0]?.sessionManager?.getSessionFile();
+		expect(file).toBeDefined();
+		expect(existsSync(file as string)).toBe(true);
+		expect(readFileSync(file as string, "utf8")).toContain("looks fine");
 	});
 });
 

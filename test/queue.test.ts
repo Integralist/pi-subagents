@@ -31,7 +31,8 @@ describe("SubagentQueue", () => {
 		expect(queue.queuedCount).toBe(0);
 	});
 
-	it("runs up to the limit at the same time", () => {
+	// The specification's scenario, quoted.
+	it("Runs up to the limit", () => {
 		const queue = new SubagentQueue(2);
 		const jobs = [job(), job()];
 
@@ -43,19 +44,30 @@ describe("SubagentQueue", () => {
 		expect(queue.queuedCount).toBe(0);
 	});
 
-	// The plan's acceptance criterion for Task 4.1, quoted.
-	it("queues a fourth submission against a limit of 3", async () => {
+	/** Three running against a limit of three, and a fourth asked for. */
+	function full() {
 		const queue = new SubagentQueue(3);
 		const running = [job(), job(), job()];
 		running.forEach((j, i) => {
 			queue.submit(`running-${i}`, j.run);
 		});
 		const fourth = job();
-
 		queue.submit("fourth", fourth.run);
+		return { queue, running, fourth };
+	}
+
+	// The specification's scenario, quoted, and the plan's acceptance criterion
+	// for Task 4.1.
+	it("Queues past the limit", () => {
+		const { queue, fourth } = full();
 
 		expect(fourth.run).not.toHaveBeenCalled();
 		expect(queue.queuedCount).toBe(1);
+	});
+
+	// The specification's scenario, quoted.
+	it("Starts a queued subagent when a slot frees", async () => {
+		const { queue, running, fourth } = full();
 
 		running[0]?.finish();
 		await settled();

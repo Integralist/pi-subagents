@@ -251,7 +251,8 @@ describe("Feature: Starting a subagent", () => {
 
 describe("Feature: Reading a subagent result back", () => {
 	// The plan's acceptance criterion for Task 3.5, quoted.
-	it("returns the full output for a finished subagent", async () => {
+	// The specification's scenario, quoted.
+	it("Returns a finished subagent's output", async () => {
 		const { tool, resultTool, delivered } = toolOverRealRunner({
 			reply: [assistant("two defects found")],
 		});
@@ -270,7 +271,9 @@ describe("Feature: Reading a subagent result back", () => {
 	});
 
 	// The plan's acceptance criterion for Task 3.5, quoted.
-	it("says a running subagent has no result yet", async () => {
+	// The specification's scenario, quoted: the reply says it is still
+	// running, and no output text is returned.
+	it("Reports a running subagent as unfinished", async () => {
 		const hanging = vi.fn(
 			() => new Promise<never>(() => {}),
 		) as unknown as () => Promise<never>;

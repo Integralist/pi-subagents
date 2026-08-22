@@ -499,7 +499,9 @@ describe("spawn_subagent", () => {
 	});
 
 	// The specification's scenario, quoted.
-	it("refuses an unknown subagent type with a message listing the known types", async () => {
+	// The specification's scenario, quoted: the call fails with a message
+	// listing the known types, and no subagent starts.
+	it("Refuses an unknown subagent type", async () => {
 		const { tool, run } = harness({
 			agents: [
 				agentConfig({ name: "reviewer" }),

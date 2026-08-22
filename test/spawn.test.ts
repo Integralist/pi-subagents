@@ -615,6 +615,45 @@ describe("startSubagent turn limits", () => {
 		expect(stub.steer).toHaveBeenCalledTimes(1);
 	});
 
+	/**
+	 * The warning is a warning, not a stop. A subagent that takes it and answers
+	 * finishes normally, and the answer it gave is its result.
+	 */
+	// The specification's scenario, quoted.
+	it("Returns the wrap-up answer", async () => {
+		const stub = stubSession();
+		const gate = deferred<SubagentOutcome>();
+		const registry = new SubagentRegistry();
+		startSubagent({
+			ctx,
+			config: agentConfig({ maxTurns: 2 }),
+			prompt: "review",
+			description: "review",
+			registry,
+			queue: new SubagentQueue(5),
+			sendMessage: send.sendMessage as unknown as SendMessage,
+			run: vi.fn((opts: RunSubagentOptions) => {
+				opts.onSession?.(stub.session as never, undefined);
+				return gate.promise;
+			}),
+			newId: () => "abc123",
+			now: () => 1_000,
+		});
+
+		// The limit is reached, so it is told to wrap up.
+		stub.endTurn(2);
+		await settle();
+		expect(stub.steer).toHaveBeenCalledTimes(1);
+
+		// And it does, on its next turn.
+		gate.settle({ status: "completed", output: "the queue is fine" });
+		await send.delivered;
+
+		expect(stub.abort).not.toHaveBeenCalled();
+		expect(registry.get("abc123")?.status).toBe("completed");
+		expect(delivered(send).message.content).toContain("the queue is fine");
+	});
+
 	it("stops one that runs past the limit and its grace", async () => {
 		const stub = stubSession();
 		const registry = launch(agentConfig({ maxTurns: 2 }), stub);
@@ -958,7 +997,9 @@ describe("resumeSubagent", () => {
 	 * the file until the child's first assistant reply, so a subagent that failed
 	 * before answering names a file that never existed.
 	 */
-	it("starts fresh when the stored transcript is gone", () => {
+	// The specification's scenario, quoted: a new subagent starts with no
+	// earlier context, and the reply says the earlier conversation was not found.
+	it("Starts fresh when the conversation is gone", () => {
 		const { registry, record } = finished(
 			"/tmp/pi-subagents-never-written.jsonl",
 		);

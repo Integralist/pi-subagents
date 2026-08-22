@@ -2,3 +2,6 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# `make agents` copies the shipped examples here for a local session.
+.pi/
