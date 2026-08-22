@@ -18,7 +18,6 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	MessageRenderer,
-	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Text } from "@earendil-works/pi-tui";
 import type { AgentConfig } from "./agents.ts";
@@ -36,6 +35,7 @@ import {
 	type SubagentOutcome,
 } from "./runner.ts";
 import { DEFAULT_MAX_TURNS, type TurnLimit, watchTurns } from "./turns.ts";
+import { STATUS_COLOR, STATUS_MARK } from "./ui/status.ts";
 
 /** Marks the completion notice, for the renderer and for anything filtering. */
 export const COMPLETE_MESSAGE_TYPE = "subagent-complete";
@@ -327,6 +327,10 @@ export function resumeSubagent(opts: ResumeSubagentOptions): ResumeResult {
 		// `get_subagent_result` hands the old answer back as this run's.
 		outcome: undefined,
 		stoppedBecause: undefined,
+		// Cleared so the registry stamps a fresh one when this run ends. Left in
+		// place, the list would treat the continuation as having finished at the
+		// original time and drop the row the moment it appeared.
+		finishedAt: undefined,
 		// The new run's turn watcher counts from zero, so the old total would only
 		// sit here until the first turn overwrote it.
 		turns: 0,
@@ -339,22 +343,6 @@ export function resumeSubagent(opts: ResumeSubagentOptions): ResumeResult {
 
 	return { ok: true, record, startedFresh: resumeFrom === undefined };
 }
-
-const STATUS_MARK: Record<SubagentStatus, string> = {
-	queued: "·",
-	running: "…",
-	completed: "✓",
-	failed: "✗",
-	stopped: "◼",
-};
-
-const STATUS_COLOR: Record<SubagentStatus, ThemeColor> = {
-	queued: "muted",
-	running: "muted",
-	completed: "success",
-	failed: "error",
-	stopped: "warning",
-};
 
 /**
  * Draw a completion notice as a compact line rather than a wall of raw text.

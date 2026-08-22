@@ -1335,7 +1335,7 @@ That has a direct consequence for how the work is handed out.
   pure, with the spec's Examples table as its cases. Tasks 8.2–8.4 are main
   thread: you will want to look at the rendering and adjust it.
 
-- [ ] **Task 8.1**: Implement column layout in `src/ui/layout.ts`.
+- [x] **Task 8.1**: Implement column layout in `src/ui/layout.ts`.
 
   ```typescript
   export function layoutColumns<T>(items: T[], perColumn: number): T[][];
@@ -1345,23 +1345,121 @@ That has a direct consequence for how the work is handed out.
   of 3; 6 → two columns of 5 and 1; 10 → two of 5. Matches the spec's
   Examples table exactly.
 
-- [ ] **Task 8.2**: Build the component in `src/ui/subagent-list.ts`.
+  > [!NOTE]
+  > As sketched. `ROWS_PER_COLUMN = 5` lives here beside it, so the
+  > component and its tests share one source for the number.
+  >
+  > Two behaviours the sketch leaves open. An empty list gives **no
+  > columns**, not one empty column — the list has nothing to draw, and
+  > saying so saves every caller looking inside. And a `perColumn` that is
+  > not a whole number above zero is treated as one: a column with no room
+  > in it could never be filled, so the loop would never advance.
+
+- [x] **Task 8.2**: Build the component in `src/ui/subagent-list.ts`.
 
   Render with `@earendil-works/pi-tui` primitives (`Text`, `Container`).
   Each row: status glyph, coloured name, description, context percent.
   Blank rather than `0%` when `percent` is null. A `N queued` row when
   the queue is non-empty.
 
-- [ ] **Task 8.3**: Mount it below the editor and keep it live.
+  > [!NOTE]
+  > **No `Text` or `Container`.** `Component` is an interface —
+  > `render(width): string[]` plus `invalidate()` — so `SubagentList`
+  > implements it directly. Wrapping each row in a `Text` and collecting
+  > them in a `Container` would render each row independently, which is
+  > exactly what side-by-side columns cannot do: a line has to be built
+  > across all the columns at once. Composition would have bought nothing
+  > and cost the ability to lay out at all.
+  >
+  > **`theme.fg` cannot colour a subagent.** It takes pi's *semantic*
+  > colour names — `ThemeColor` is `"accent" | "success" | "muted" | …` —
+  > not colours, so `"cyan"` is not a value it accepts. `colorize()` in
+  > `src/colors.ts` maps the palette's names to the terminal's own
+  > foreground codes instead, which is better than a fixed hex anyway: the
+  > emulator resolves them against the user's scheme, so a subagent's
+  > `cyan` is that user's cyan. A `color:` the terminal has no name for
+  > renders **uncoloured** — falling back to a different colour would let
+  > two subagents silently share one, defeating the only thing the colour
+  > is for. Validating `color:` at discovery instead is the better fix and
+  > is not done here.
+  >
+  > **No `N queued` row.** It would double-count: a queued subagent is
+  > already a row, with a `·` glyph, and the specification says so — "the
+  > subagent list shows one queued subagent". A summary line beside the
+  > rows it summarises is noise, so it was dropped rather than built.
+  >
+  > **`STATUS_MARK` and `STATUS_COLOR` moved to `src/ui/status.ts`.** They
+  > were private to `spawn.ts`, which also draws a subagent, and a
+  > subagent that was a `✓` in the transcript and a `◼` in the list would
+  > be a bug nobody would think to test for.
+  >
+  > Two things came out of actually looking at the rendered output, which
+  > is what this task's `/tasks`-unsuitable rating was for. Names are
+  > **padded to a common width** so descriptions all start in the same
+  > column — ragged left edges are what make a list of short rows hard to
+  > scan — capped at 16 so one long name cannot spend every other row's
+  > width on whitespace. And the description is padded **only when a
+  > percentage follows it**, since the padding exists to right-align that
+  > percentage and otherwise just fills the row to the terminal's last
+  > column.
+  >
+  > Below `MIN_COLUMN_WIDTH` (24) the list drops to fewer columns and
+  > re-lays out, so a narrow terminal gets one tall column rather than
+  > several unreadable ones — and no rows go missing in the process.
+
+- [x] **Task 8.3**: Mount it below the editor and keep it live.
 
   Subscribe to `registry.onChange()` and re-render. Finished subagents
   linger briefly before dropping out, so a result is readable.
 
-- [ ] **Task 8.4**: Tests driving the rendered output.
+  > [!NOTE]
+  > Mounted with `ctx.ui.setWidget(key, factory, { placement: "belowEditor" })` from a `session_start` handler, which is where `ctx`
+  > first becomes available. Guarded on `ctx.mode === "tui"`: a `print`,
+  > `json` or `rpc` run has no editor to sit below and nothing to redraw.
+  >
+  > **Lingering needs a timer, not just a subscription.** A finished row
+  > expires on a clock, and no registry change will ever announce that, so
+  > the last finished subagent in a quiet session would sit on screen
+  > indefinitely. The component schedules one redraw per finished subagent
+  > for the moment its row is due to leave, waiting only the time actually
+  > remaining. The timer is `unref`'d — an outstanding redraw must not
+  > delay pi's exit by up to the linger.
+  >
+  > **`SubagentRecord.finishedAt` was added, stamped by the registry.**
+  > The alternative was bookkeeping inside the component, which would have
+  > put a side effect in `render`. Stamping in `registry.update` works
+  > because every terminal status already arrives through that one door;
+  > it is stamped once, so a record edited again later does not have its
+  > clock reset, and `resumeSubagent` clears it so a continuation is not
+  > treated as having finished at the original time.
+  >
+  > `TERMINAL_STATUSES` moved from `control.ts` to `registry.ts` for the
+  > same reason: three callers now ask the registry what a status means.
+  >
+  > `SubagentRegistry` gained a `now` seam so a test can move the clock
+  > and re-render rather than wait.
+
+- [x] **Task 8.4**: Tests driving the rendered output.
 
   Construct with fake records, render, strip ANSI, assert on rows.
   Cover the Examples table from the spec's column-splitting scenario,
   the context-percent column, and distinct colours per row.
+
+  > [!NOTE]
+  > **A test theme that colours nothing can hide a real defect.** Most of
+  > these run against an identity `fg`, which keeps a layout assertion
+  > from also being a palette assertion. But a real `fg` seals trailing
+  > padding *inside* the escape codes, where `render`'s `trimEnd` cannot
+  > reach it — so against the identity theme the "no trailing padding"
+  > assertion passed whether the padding was there or not. Mutation
+  > testing caught it; that one test now uses a theme that really emits
+  > escapes. Worth remembering for Slices 9 and 10.
+  >
+  > Also verified beyond the unit tests: the module still loads under
+  > **pi's own jiti transpiler** — which matters now that `src/ui/` adds a
+  > subdirectory of `.ts`-suffixed imports — registering four tools and
+  > mounting the widget `belowEditor`, and mounting nothing at all in
+  > `print` mode.
 
 ### Slice 9: Navigating the list
 

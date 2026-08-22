@@ -37,11 +37,16 @@ import {
 	startSubagent,
 } from "./spawn.ts";
 import { DEFAULT_MAX_TURNS } from "./turns.ts";
+import { SubagentList } from "./ui/subagent-list.ts";
 
 export const SPAWN_TOOL_NAME = "spawn_subagent";
 export const RESULT_TOOL_NAME = "get_subagent_result";
 export const STEER_TOOL_NAME = "steer_subagent";
 export const STOP_TOOL_NAME = "stop_subagent";
+
+/** Identifies the list widget to pi, so remounting replaces it rather than
+ * stacking a second copy below the first. */
+export const SUBAGENT_LIST_WIDGET = "pi-subagents:list";
 
 /**
  * Every effort level pi accepts, `off` included. A plain string `enum` rather
@@ -630,4 +635,26 @@ export default function (pi: ExtensionAPI): void {
 	pi.registerTool(createSteerTool({ registry }));
 	pi.registerTool(createStopTool({ registry, queue }));
 	pi.registerMessageRenderer(COMPLETE_MESSAGE_TYPE, renderCompletion);
+
+	// The list is a terminal widget, so it is mounted once the session is up and
+	// only when there is a terminal to mount it in. `print`, `json` and `rpc`
+	// runs have no editor to sit below and nothing to redraw.
+	pi.on("session_start", (_event, ctx) => {
+		if (ctx.mode !== "tui") {
+			return;
+		}
+
+		ctx.ui.setWidget(
+			SUBAGENT_LIST_WIDGET,
+			// Built per mount rather than once: the theme arrives here, and a theme
+			// change remounts the widget with the new one.
+			(tui, theme) =>
+				new SubagentList({
+					registry,
+					theme,
+					requestRender: () => tui.requestRender(),
+				}),
+			{ placement: "belowEditor" },
+		);
+	});
 }

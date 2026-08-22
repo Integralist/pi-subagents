@@ -28,6 +28,19 @@ export type SubagentStatus =
 	| "failed"
 	| "stopped";
 
+/**
+ * The statuses a subagent does not come back from.
+ *
+ * Owned here because the registry is what decides a record's status means, and
+ * three callers ask the same question: the control operations refuse to steer or
+ * stop one of these, and the list stops showing them once they have been read.
+ */
+export const TERMINAL_STATUSES: ReadonlySet<SubagentStatus> = new Set([
+	"completed",
+	"failed",
+	"stopped",
+]);
+
 export interface SubagentRecord {
 	/** Stable and unique; how tools address this run. */
 	id: string;
@@ -40,6 +53,13 @@ export interface SubagentRecord {
 	status: SubagentStatus;
 	color: string;
 	startedAt: number;
+	/**
+	 * When this subagent reached a terminal status, stamped by the registry.
+	 *
+	 * The list uses it to keep a finished subagent on screen for a moment so its
+	 * result can be read, then drop it. Absent for anything still going.
+	 */
+	finishedAt?: number;
 	/** Absent until the run actually starts, and while queued. */
 	session?: AgentSession;
 	/**
@@ -88,9 +108,16 @@ export class SubagentRegistry {
 	 */
 	readonly #records = new Map<string, SubagentRecord>();
 	readonly #listeners = new Set<ChangeListener>();
+	readonly #now: () => number;
+
+	/** `now` is a seam: a test needs a clock it can move to watch a row expire. */
+	constructor(now: () => number = Date.now) {
+		this.#now = now;
+	}
 
 	add(record: SubagentRecord): void {
 		this.#records.set(record.id, record);
+		this.#stampIfFinished(record);
 		this.#notify();
 	}
 
@@ -126,8 +153,28 @@ export class SubagentRegistry {
 		}
 
 		Object.assign(record, changes);
+		this.#stampIfFinished(record);
 		this.#notify();
 		return record;
+	}
+
+	/**
+	 * Note when a subagent finished, the first time it is seen to have done so.
+	 *
+	 * Here rather than at each call site because every terminal status arrives
+	 * through this one door, and a caller that forgot would leave the list unable
+	 * to tell a subagent that just finished from one that finished half an hour
+	 * ago. Only stamped once: a record whose status is edited again after the
+	 * fact — a resumed subagent finishing a second time clears this first — must
+	 * not have its clock quietly reset.
+	 */
+	#stampIfFinished(record: SubagentRecord): void {
+		if (
+			TERMINAL_STATUSES.has(record.status) &&
+			record.finishedAt === undefined
+		) {
+			record.finishedAt = this.#now();
+		}
 	}
 
 	/**

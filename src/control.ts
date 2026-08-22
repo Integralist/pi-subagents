@@ -10,10 +10,10 @@
 
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { SubagentQueue } from "./queue.ts";
-import type {
-	SubagentRecord,
-	SubagentRegistry,
-	SubagentStatus,
+import {
+	type SubagentRecord,
+	type SubagentRegistry,
+	TERMINAL_STATUSES,
 } from "./registry.ts";
 import { describeCause } from "./runner.ts";
 
@@ -41,12 +41,6 @@ export interface ControlDeps {
 	registry: SubagentRegistry;
 	queue: SubagentQueue;
 }
-
-const TERMINAL_STATUSES: ReadonlySet<SubagentStatus> = new Set([
-	"completed",
-	"failed",
-	"stopped",
-]);
 
 /**
  * Do something to a session and turn any objection into a reason.

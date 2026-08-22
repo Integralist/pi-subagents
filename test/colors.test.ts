@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assignColor, PALETTE } from "../src/colors.ts";
+import { assignColor, colorize, PALETTE } from "../src/colors.ts";
 
 describe("assignColor", () => {
 	it("takes the first palette entry for the first subagent", () => {
@@ -44,5 +44,45 @@ describe("assignColor", () => {
 	// hand back undefined to something that expects a colour.
 	it("falls back to the first colour for an index that makes no sense", () => {
 		expect(assignColor(-1)).toBe(PALETTE[0]);
+	});
+});
+
+describe("colorize", () => {
+	it("wraps the text in the named colour and closes it again", () => {
+		expect(colorize("cyan", "reviewer")).toBe("\x1b[36mreviewer\x1b[39m");
+	});
+
+	// Every palette colour has to render, or the list would show plain rows for
+	// subagents that were assigned a colour perfectly correctly.
+	it("renders every colour the palette hands out", () => {
+		for (const color of PALETTE) {
+			expect(colorize(color, "x"), color).not.toBe("x");
+		}
+	});
+
+	it("gives each palette colour a distinct code", () => {
+		const rendered = new Set(PALETTE.map((color) => colorize(color, "x")));
+
+		expect(rendered.size).toBe(PALETTE.length);
+	});
+
+	it("closes with a foreground reset rather than a full reset", () => {
+		// A full `\x1b[0m` would also clear any bold or background the caller had
+		// set around this text.
+		expect(colorize("red", "x").endsWith("\x1b[39m")).toBe(true);
+	});
+
+	it("takes a colour however it was capitalised or spaced", () => {
+		expect(colorize("  CyAn  ", "x")).toBe(colorize("cyan", "x"));
+	});
+
+	/**
+	 * Falling back to some other colour would be worse than none: two subagents
+	 * could silently share one, which is the only thing the colour is for.
+	 */
+	it("leaves text alone for a colour the terminal does not have", () => {
+		for (const unknown of ["hotpink", "#ff00ff", "", "  "]) {
+			expect(colorize(unknown, "reviewer"), unknown).toBe("reviewer");
+		}
 	});
 });

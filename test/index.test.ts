@@ -17,11 +17,13 @@ import extension, {
 	SPAWN_TOOL_NAME,
 	STEER_TOOL_NAME,
 	STOP_TOOL_NAME,
+	SUBAGENT_LIST_WIDGET,
 } from "../src/index.ts";
 import { DEFAULT_CONCURRENCY, SubagentQueue } from "../src/queue.ts";
 import { SubagentRegistry } from "../src/registry.ts";
 import { runInChildContext, type SubagentOutcome } from "../src/runner.ts";
 import type { SendMessage } from "../src/spawn.ts";
+import { SubagentList } from "../src/ui/subagent-list.ts";
 
 function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	return {
@@ -202,19 +204,47 @@ beforeEach(() => {
 });
 
 describe("extension registration", () => {
+	interface MountedWidget {
+		key: string;
+		content: unknown;
+		options?: { placement?: string };
+	}
+
 	function register() {
 		const registered: ToolDefinition[] = [];
 		const renderers: string[] = [];
+		const handlers = new Map<string, (event: unknown, c: unknown) => void>();
 		const pi = {
 			registerTool: (tool: ToolDefinition) => registered.push(tool),
 			getAllTools: () => [],
 			registerMessageRenderer: (customType: string) =>
 				renderers.push(customType),
 			sendMessage: vi.fn(),
+			on: (event: string, handler: (e: unknown, c: unknown) => void) => {
+				handlers.set(event, handler);
+			},
 		} as unknown as ExtensionAPI;
 
 		extension(pi);
-		return { registered, renderers };
+
+		/** Start a session in `mode` and report what it mounted. */
+		const startSession = (mode: string) => {
+			const widgets: MountedWidget[] = [];
+			const tuiContext = {
+				mode,
+				ui: {
+					setWidget: (
+						key: string,
+						content: unknown,
+						options?: { placement?: string },
+					) => widgets.push({ key, content, options }),
+				},
+			};
+			handlers.get("session_start")?.({}, tuiContext);
+			return widgets;
+		};
+
+		return { registered, renderers, handlers, startSession };
 	}
 
 	it("registers the spawn tool", () => {
@@ -257,6 +287,45 @@ describe("extension registration", () => {
 	// Without a renderer the notice shows up as raw text in the transcript.
 	it("registers a renderer for the completion notice", () => {
 		expect(register().renderers).toContain("subagent-complete");
+	});
+
+	describe("the subagent list widget", () => {
+		it("mounts below the editor once the session starts", () => {
+			const widgets = register().startSession("tui");
+
+			expect(widgets).toHaveLength(1);
+			expect(widgets[0]?.key).toBe(SUBAGENT_LIST_WIDGET);
+			expect(widgets[0]?.options?.placement).toBe("belowEditor");
+		});
+
+		it("builds the list from the theme it is handed", () => {
+			const widgets = register().startSession("tui");
+			const factory = widgets[0]?.content as (
+				tui: unknown,
+				theme: unknown,
+			) => SubagentList;
+
+			const redraws: number[] = [];
+			const list = factory(
+				{ requestRender: () => redraws.push(1) },
+				{
+					fg: (_c: string, text: string) => text,
+				},
+			);
+
+			expect(list).toBeInstanceOf(SubagentList);
+			expect(list.render(80)).toEqual([]);
+			list.dispose();
+		});
+
+		/**
+		 * The list is a terminal widget. A print, json or rpc run has no editor to
+		 * sit below and nothing to redraw, and mounting there would ask pi for a
+		 * component it has nowhere to put.
+		 */
+		it.each(["print", "json", "rpc"])("mounts nothing in %s mode", (mode) => {
+			expect(register().startSession(mode)).toEqual([]);
+		});
 	});
 });
 
