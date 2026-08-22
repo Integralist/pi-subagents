@@ -70,7 +70,9 @@ describe("steerSubagent", () => {
 		const stub = stubSession();
 		const subject = tracked({ session: stub.session });
 
-		const result = await steerSubagent(subject, "look at the tests instead");
+		const result = await steerSubagent(subject, "look at the tests instead", {
+			registry,
+		});
 
 		expect(result).toEqual({ ok: true });
 		expect(stub.steer).toHaveBeenCalledWith("look at the tests instead");
@@ -83,7 +85,7 @@ describe("steerSubagent", () => {
 			const stub = stubSession();
 			const subject = record({ status, session: stub.session });
 
-			const result = await steerSubagent(subject, "carry on");
+			const result = await steerSubagent(subject, "carry on", { registry });
 
 			expect(result.ok, status).toBe(false);
 			expect(result.ok ? "" : result.reason, status).toMatch(/finished/i);
@@ -92,17 +94,39 @@ describe("steerSubagent", () => {
 	});
 
 	/**
-	 * A queued subagent has no session to steer. Saying so beats the alternative
-	 * of accepting the message and dropping it, which reads to the caller as a
-	 * redirect that quietly never happened.
+	 * A queued subagent has no session to steer, and refusing would be the wrong
+	 * answer: nothing has read its task yet, so the message goes into it. The
+	 * specification's own table says a queued subagent receives what it is sent.
 	 */
-	it("refuses to steer a subagent that has not started", async () => {
-		const subject = record({ status: "queued", session: undefined });
+	it("keeps a message for a subagent that has not started", async () => {
+		const subject = tracked({ status: "queued", session: undefined });
 
-		const result = await steerSubagent(subject, "carry on");
+		const result = await steerSubagent(subject, "and check the tests", {
+			registry,
+		});
 
-		expect(result.ok).toBe(false);
-		expect(result.ok ? "" : result.reason).toMatch(/not started/i);
+		expect(result).toEqual({ ok: true });
+		expect(registry.get("abc123")?.pending).toEqual(["and check the tests"]);
+	});
+
+	it("keeps every message sent to it while it waits, in order", async () => {
+		const subject = tracked({ status: "queued", session: undefined });
+
+		await steerSubagent(subject, "first", { registry });
+		await steerSubagent(subject, "second", { registry });
+
+		expect(registry.get("abc123")?.pending).toEqual(["first", "second"]);
+	});
+
+	/** Through the registry, so the list and an open view redraw with it. */
+	it("reports a waiting subagent's new message as a change", async () => {
+		const subject = tracked({ status: "queued", session: undefined });
+		const changes = vi.fn();
+		registry.onChange(changes);
+
+		await steerSubagent(subject, "and check the tests", { registry });
+
+		expect(changes).toHaveBeenCalled();
 	});
 
 	/**
@@ -113,10 +137,10 @@ describe("steerSubagent", () => {
 	it("refuses to steer a running subagent whose session is not up yet", async () => {
 		const subject = record({ status: "running", session: undefined });
 
-		const result = await steerSubagent(subject, "carry on");
+		const result = await steerSubagent(subject, "carry on", { registry });
 
 		expect(result.ok).toBe(false);
-		expect(result.ok ? "" : result.reason).toMatch(/not started/i);
+		expect(result.ok ? "" : result.reason).toMatch(/starting up/i);
 	});
 
 	it("refuses a message with nothing in it", async () => {
@@ -124,7 +148,7 @@ describe("steerSubagent", () => {
 		const subject = record({ session: stub.session });
 
 		for (const empty of ["", "   ", "\n\t"]) {
-			const result = await steerSubagent(subject, empty);
+			const result = await steerSubagent(subject, empty, { registry });
 
 			expect(result.ok, JSON.stringify(empty)).toBe(false);
 			expect(result.ok ? "" : result.reason).toMatch(/empty/i);
@@ -136,7 +160,7 @@ describe("steerSubagent", () => {
 		const stub = stubSession();
 		const subject = record({ session: stub.session });
 
-		await steerSubagent(subject, "  mind the indentation  ");
+		await steerSubagent(subject, "  mind the indentation  ", { registry });
 
 		expect(stub.steer).toHaveBeenCalledWith("  mind the indentation  ");
 	});
@@ -150,7 +174,7 @@ describe("steerSubagent", () => {
 		const stub = stubSession({ steerFails: true });
 		const subject = record({ session: stub.session });
 
-		const result = await steerSubagent(subject, "carry on");
+		const result = await steerSubagent(subject, "carry on", { registry });
 
 		expect(result.ok).toBe(false);
 		expect(result.ok ? "" : result.reason).toMatch(/nothing to steer/);
@@ -164,7 +188,9 @@ describe("steerSubagent", () => {
 		} as unknown as AgentSession;
 		const subject = record({ session: exploding });
 
-		await expect(steerSubagent(subject, "carry on")).resolves.toMatchObject({
+		await expect(
+			steerSubagent(subject, "carry on", { registry }),
+		).resolves.toMatchObject({
 			ok: false,
 		});
 	});

@@ -22,7 +22,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { type ControlResult, steerSubagent } from "../control.ts";
+import type { ControlResult } from "../control.ts";
 import {
 	type SubagentRecord,
 	type SubagentRegistry,
@@ -60,8 +60,12 @@ export interface SubagentViewerOptions {
 	cwd: string;
 	/** Closes the view. In a session this is pi's own `done` callback. */
 	close: () => void;
-	/** Injected so a test can drive the view without a session. */
-	steer?: (record: SubagentRecord, message: string) => Promise<ControlResult>;
+	/**
+	 * Sends the composed message. Handed in rather than reached for: steering a
+	 * subagent that has not started yet writes to the registry, which the caller
+	 * owns.
+	 */
+	steer: (record: SubagentRecord, message: string) => Promise<ControlResult>;
 	/**
 	 * Halts the subagent and tells the main model it will get no answer.
 	 *
@@ -287,8 +291,7 @@ export class SubagentViewer implements Component {
 		}
 
 		this.#closeComposer("Sending…");
-		const steer = this.#options.steer ?? steerSubagent;
-		void steer(this.#options.record, value).then((result) => {
+		void this.#options.steer(this.#options.record, value).then((result) => {
 			this.#report(result, "Sent.");
 		});
 	}

@@ -76,6 +76,15 @@ export interface SubagentRecord {
 	/** Absent until the run ends. */
 	outcome?: SubagentOutcome;
 	/**
+	 * Messages to fold into the prompt of a run that has not started yet.
+	 *
+	 * A subagent waiting for a slot has no session, so there is nothing to steer
+	 * — but the user addressing it means the same thing either way, and its task
+	 * has not been read yet, so an addition still belongs in it. Read and cleared
+	 * by the run as it starts.
+	 */
+	pending?: string[];
+	/**
 	 * Why this run was cut short, when the reason is not in the outcome itself.
 	 *
 	 * A stopped outcome says only that the subagent did not finish. This says

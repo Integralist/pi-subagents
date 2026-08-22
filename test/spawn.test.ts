@@ -155,6 +155,9 @@ function delivered(send: ReturnType<typeof stubSend>) {
 	return { message: call[0], options: call[1] ?? {} };
 }
 
+/** Let the queue hand its slot on, however many ticks that takes. */
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
 let run: ReturnType<typeof stubRun>;
 let send: ReturnType<typeof stubSend>;
 
@@ -179,6 +182,119 @@ describe("startSubagent", () => {
 
 		expect(registry.get("abc123")).toBe(record);
 		expect(registry.running()).toHaveLength(1);
+	});
+
+	/**
+	 * A message sent to a subagent still waiting for a slot has nowhere to go
+	 * until the run starts, so it joins the task the run starts on. Its own
+	 * paragraph, rather than running into the end of the original task.
+	 */
+	describe("messages that arrived while it waited", () => {
+		/**
+		 * A subagent past the limit, with the message it was sent while it waited,
+		 * and the slot freed so its run starts.
+		 */
+		async function waitedWith(...pending: string[]) {
+			const queue = new SubagentQueue(1);
+			const blocking = stubRun();
+			const { registry } = start(blocking, send, { queue, id: "first" });
+			const waiting = start(run, send, {
+				queue,
+				id: "second",
+				registry,
+			});
+			if (pending.length > 0) {
+				registry.update(waiting.record.id, { pending });
+			}
+
+			blocking.finish({ status: "completed", output: "done" });
+			await settle();
+			return { registry, record: waiting.record };
+		}
+
+		it("starts on the task with what it was sent", async () => {
+			await waitedWith("and check the tests");
+
+			expect(run.calls[0]?.prompt).toBe(
+				"review src/agents.ts\n\nand check the tests",
+			);
+		});
+
+		it("keeps them in the order they were sent", async () => {
+			await waitedWith("first thing", "second thing");
+
+			expect(run.calls[0]?.prompt).toBe(
+				"review src/agents.ts\n\nfirst thing\n\nsecond thing",
+			);
+		});
+
+		it("leaves the task alone when nothing was sent", async () => {
+			await waitedWith();
+
+			expect(run.calls[0]?.prompt).toBe("review src/agents.ts");
+		});
+
+		/** Or resuming the same record later would start on them a second time. */
+		it("forgets them once the run has them", async () => {
+			const { registry, record } = await waitedWith("and check the tests");
+
+			expect(registry.get(record.id)?.pending).toBeUndefined();
+		});
+	});
+
+	/**
+	 * The handle is what `@name` addresses, so it has to be unique for the
+	 * session: a message to `@reviewer` must have exactly one place to go.
+	 */
+	describe("handles", () => {
+		it("gives the first subagent of a type the bare name", () => {
+			expect(start(run, send).record.handle).toBe("reviewer");
+		});
+
+		it("numbers the next subagent of the same type", () => {
+			const first = start(run, send);
+			const second = start(stubRun(), send, {
+				registry: first.registry,
+				id: "def456",
+			});
+
+			expect(first.record.handle).toBe("reviewer");
+			expect(second.record.handle).toBe("reviewer-2");
+		});
+
+		it("makes a multi-word agent name addressable", () => {
+			const { record } = start(run, send, {
+				config: agentConfig({ name: "Code Reviewer" }),
+			});
+
+			expect(record.handle).toBe("code-reviewer");
+		});
+
+		/**
+		 * The record is reused rather than replaced, so the handle someone has
+		 * been typing goes on reaching the same subagent.
+		 */
+		it("keeps the handle when a subagent is resumed", () => {
+			const { record, registry } = start(run, send);
+			const handle = record.handle;
+			registry.update(record.id, {
+				status: "completed",
+				outcome: { status: "completed", output: "done" },
+			});
+
+			resumeSubagent({
+				ctx,
+				config: agentConfig(),
+				prompt: "carry on",
+				record,
+				registry,
+				queue: new SubagentQueue(5),
+				sendMessage: send.sendMessage as unknown as SendMessage,
+				run: stubRun().run,
+			});
+
+			expect(record.handle).toBe(handle);
+		});
 	});
 
 	it("starts the run without waiting for it", () => {

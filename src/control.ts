@@ -59,14 +59,18 @@ async function attempt(action: () => Promise<void>): Promise<ControlResult> {
 }
 
 /**
- * Send a subagent a new instruction mid-run.
+ * Send a subagent a new instruction, wherever it has got to.
  *
- * Pi delivers a steering message after the current turn's tool calls and before
- * the next model call, so it lands where the subagent can still act on it.
+ * For one already working, pi delivers a steering message after the current
+ * turn's tool calls and before the next model call, so it lands where the
+ * subagent can still act on it. For one still waiting for a slot there is
+ * nothing to steer, so the message waits with it and joins the task it starts
+ * on — the same outcome, by the only route there is.
  */
 export async function steerSubagent(
 	record: SubagentRecord,
 	message: string,
+	deps: Pick<ControlDeps, "registry">,
 ): Promise<ControlResult> {
 	if (TERMINAL_STATUSES.has(record.status)) {
 		return { ok: false, reason: "it has already finished" };
@@ -76,12 +80,23 @@ export async function steerSubagent(
 		return { ok: false, reason: "a steering message cannot be empty" };
 	}
 
+	// Waiting for a slot: there is no session to steer, and refusing would be
+	// wrong — nothing has read its task yet, so the message goes into it. Kept on
+	// the record rather than folded in here, because the run is the only thing
+	// that knows when it is about to be read.
+	if (record.status === "queued") {
+		deps.registry.update(record.id, {
+			pending: [...(record.pending ?? []), message],
+		});
+		return { ok: true };
+	}
+
 	// Not `status === "running"`: a record is running from the moment it takes a
 	// slot, which is a fraction before the run has built its session. The session
 	// itself is the only honest test of whether there is anything to steer.
 	const { session } = record;
 	if (!session) {
-		return { ok: false, reason: "it has not started yet" };
+		return { ok: false, reason: "it is still starting up; try again" };
 	}
 
 	// Delivered exactly as written. Trimming would quietly rewrite a message

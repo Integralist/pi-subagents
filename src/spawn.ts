@@ -27,6 +27,7 @@ import {
 	type ControlResult,
 	stopSubagent,
 } from "./control.ts";
+import { assignHandle } from "./mention.ts";
 import type { SubagentQueue } from "./queue.ts";
 import {
 	type SubagentRecord,
@@ -238,6 +239,30 @@ export async function stopFromUi(
 }
 
 /**
+ * The task this run should actually start on: the prompt it was given, plus
+ * anything said to it while it waited for a slot.
+ *
+ * Joined with a blank line so the addition reads as its own paragraph rather
+ * than running into the end of the original task. Separate messages would be
+ * truer to what the user typed, but a run is prompted once, and a message that
+ * has to wait for the first turn to be delivered would be read after the work
+ * it was meant to change.
+ */
+function takePending(
+	record: SubagentRecord,
+	registry: SubagentRegistry,
+	prompt: string,
+): string {
+	const pending = record.pending;
+	if (!pending?.length) {
+		return prompt;
+	}
+
+	registry.update(record.id, { pending: undefined });
+	return [prompt, ...pending].join("\n\n");
+}
+
+/**
  * Run the subagent and tell the conversation how it went.
  *
  * Runs detached, with nobody awaiting it, so every failure is contained here:
@@ -255,12 +280,17 @@ async function runAndAnnounce(
 	const { registry, sendMessage } = opts;
 	// Everything watching the child session, torn down together when it ends.
 	const stopWatching: Array<() => void> = [];
+	// Anything said to this subagent while it waited for a slot joins the task it
+	// is about to read. Taken before the first `await`, so nothing can arrive
+	// between reading them and clearing them, and cleared so a later run of the
+	// same record does not start on them again.
+	const prompt = takePending(record, registry, opts.prompt);
 
 	try {
 		const outcome = await run({
 			ctx: opts.ctx,
 			config: opts.config,
-			prompt: opts.prompt,
+			prompt,
 			model: opts.model,
 			thinkingLevel: opts.thinkingLevel,
 			sessionDir: opts.sessionDir,
@@ -326,9 +356,12 @@ export function startSubagent(opts: StartSubagentOptions): SubagentRecord {
 
 	const record: SubagentRecord = {
 		id: newId(),
-		// Slice 11 makes handles unique — "reviewer", "reviewer-2". Until then the
-		// type doubles as the label and the id does the distinguishing.
-		handle: config.name,
+		// Unique for the session, because `@reviewer` has to have exactly one
+		// place to go. A second reviewer is `reviewer-2`.
+		handle: assignHandle(
+			config.name,
+			(candidate) => registry.get(candidate) !== undefined,
+		),
 		type: config.name,
 		description,
 		status: "queued",

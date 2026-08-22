@@ -1154,6 +1154,15 @@ That has a direct consequence for how the work is handed out.
   > session that is not there. And the message is delivered exactly as
   > written: trimming it would quietly rewrite one whose indentation was
   > the point.
+  >
+  > **Slice 11 changed this signature.** `steerSubagent` now takes
+  > `{ registry }` as well, and a *queued* subagent no longer refuses:
+  > the message is kept on its record and folded into the task its run
+  > starts on. The specification's routing table requires a queued
+  > subagent to receive what it is sent, and "it has not started yet" was
+  > the wrong answer to that. What is left of the refusal is the narrow
+  > window where a record has taken a slot but its session is not up
+  > yet — now worded "it is still starting up; try again".
 
 - [x] **Task 6.2**: Register `steer_subagent` and `stop_subagent`.
 
@@ -1749,12 +1758,44 @@ That has a direct consequence for how the work is handed out.
   pure, and the spec's routing table is its test cases verbatim. Tasks 11.1 and
   11.3 are main thread.
 
-- [ ] **Task 11.1**: Assign handles.
+- [x] **Task 11.1**: Assign handles.
 
   Lowercased type, numbered on collision: `explore`, `explore-2`.
   `main` is reserved. Assigned at spawn, stored on the record.
 
-- [ ] **Task 11.2**: Parse mentions in `src/mention.ts`.
+  > [!NOTE]
+  > **Lowercasing is not enough: a handle has to be one token.** An
+  > agent's `name:` is free text — "Code Reviewer" is a perfectly good
+  > one — and a handle with a space in it could never be addressed,
+  > because the space is what separates a mention from its message. So
+  > `assignHandle` slugs: lowercase, runs of anything else become a
+  > single `-`, edges trimmed, and a name with nothing usable in it
+  > ("!!!") falls back to `agent` rather than to `""`.
+  >
+  > **`main` is skipped rather than merely unused**, so an agent actually
+  > called "main" starts at `main-2`. A subagent reachable only under the
+  > escape handle would be reachable by nobody.
+  >
+  > **Numbering starts the second one at `-2`**, which is how people
+  > count: "explore" and "explore-2", never "explore-1".
+  >
+  > **Taken-ness is asked, not looked up.** `assignHandle(name,
+  > isTaken)` keeps the module free of the registry, and `startSubagent`
+  > passes `registry.get(candidate) !== undefined` — which also rules out
+  > a handle that collides with an *id*, since both are addresses and
+  > `get` accepts either.
+  >
+  > **It lives in `src/mention.ts`, not a module of its own.** Handing
+  > out handles and reading them back have to agree on what a handle may
+  > look like, and both need `MAIN_HANDLE`; splitting them would be two
+  > files sharing one rule.
+  >
+  > **Nothing model-facing changed.** The tools still speak in ids —
+  > that is what `spawn_subagent` returns and what the model has — so
+  > unique handles improve the *user's* surfaces (the list, the open
+  > view, `@name`) and leave every tool result as it was.
+
+- [x] **Task 11.2**: Parse mentions in `src/mention.ts`.
 
   ```typescript
   export type Mention =
@@ -1771,7 +1812,31 @@ That has a direct consequence for how the work is handed out.
   strips and passes through; an unknown handle passes through
   untouched. Pure, so every row of that table is a direct unit test.
 
-- [ ] **Task 11.3**: Wire the `input` event.
+  > [!NOTE]
+  > Landed as sketched, with four decisions the table leaves open.
+  >
+  > **The pattern matches `@\S+`, not a handle's own shape.** What counts
+  > as a handle is settled by asking `known`, and a stricter pattern here
+  > would be a second definition of the same thing, free to diverge from
+  > `assignHandle`. It also means `@someone@example.com is the contact`
+  > passes through as the ordinary sentence it is.
+  >
+  > **Any whitespace separates**, newline included, so a pasted message
+  > that starts on the line below its mention still routes.
+  >
+  > **A leading space does not change what was meant**, so the text is
+  > `trimStart`ed before matching.
+  >
+  > **The handle is lowercased before it is looked up**, because someone
+  > typing `@Explore` means the subagent they can see in the list.
+  >
+  > **Mutation testing found the "is there a message" rule written
+  > twice** — once in the pattern (`\s+([\s\S]+)`) and once in the guard
+  > after it. Breaking either alone changed nothing. The pattern is now
+  > the loose one and the guard owns the rule, so there is one place to
+  > read and one place to break.
+
+- [x] **Task 11.3**: Wire the `input` event.
 
   ```typescript
   pi.on("input", async (event, ctx) => {
@@ -1788,6 +1853,58 @@ That has a direct consequence for how the work is handed out.
 
   Guard against re-entry: text this extension submits itself must not
   be re-parsed as a mention.
+
+  > [!NOTE]
+  > **The sketch's `known` is wrong**, and it is the interesting bug in
+  > this slice. `h => registry.get(h) !== undefined` can never be true
+  > for a subagent that has *never started* — there is no record — so the
+  > fourth row of the specification's table would have been unreachable
+  > and `@explore` would have passed through to the main model. A handle
+  > is known when a record answers to it **or** an agent file slugs to
+  > it.
+  >
+  > **A queued subagent had nowhere to put a message**, which is the
+  > other half of the same problem: `steerSubagent` refused one, and the
+  > table says a queued subagent receives what it is sent. Slice 6's
+  > contract was widened rather than worked around — see the note there.
+  > The message waits on the record as `pending` and `runAndAnnounce`
+  > folds it into the prompt as the run starts, joined by a blank line
+  > and cleared as it is read. Folding beats delivering it as a separate
+  > message: a run is prompted once, and a steer queued before the first
+  > turn would be read *after* the work it was meant to change.
+  >
+  > **Every outcome is a `ctx.ui.notify`, never a message.** A message
+  > would land in the main model's context — `sendMessage` pushes custom
+  > messages into `agent.state.messages` — and the whole point of a
+  > mention is that the exchange costs no main turn and no main context.
+  > It also means a refusal has somewhere to go: a subagent that finished
+  > between the typing and the send, an agent file that has been deleted,
+  > a session that refused the steer.
+  >
+  > **A refused mention is still `handled`.** The message was addressed
+  > to a subagent; handing it to the main model instead would be a
+  > stranger outcome than being told plainly that it went nowhere.
+  >
+  > **Starting from a mention resolves the model exactly as the tool
+  > does**, through the same `chooseModel`, so `@explore` and a
+  > `spawn_subagent` call produce the same subagent. An unusable `model:`
+  > in the agent file refuses the message rather than quietly running it
+  > on something else. Its `thinking:` and `maxTurns:` come along too.
+  >
+  > **The row's description is the message's first line**, trimmed, so a
+  > pasted paragraph does not turn the list into prose.
+  >
+  > **The re-entry guard is `source === "extension"`.** Our own
+  > completion notices turn out *not* to re-enter — a custom message
+  > never reaches `prompt()` — but `sendUserMessage` does
+  > (`agent-session.js:1129`), so any extension composing text would
+  > otherwise have it silently rerouted, with no way to opt out.
+  >
+  > **`@explore` after that subagent finished continues it rather than
+  > starting a second one**, and there is no way to ask for a fresh one
+  > by mention. That follows from dispatching on the record, and it is
+  > the behaviour the table asks for; a `@explore!` style "start another"
+  > would be a new decision, not this slice's.
 
 ### Slice 12: Live model change (droppable)
 
@@ -1859,7 +1976,7 @@ That has a direct consequence for how the work is handed out.
 | `src/control.ts`          | New — steer and stop                       |
 | `src/model-resolver.ts`   | New — fuzzy model matching                 |
 | `src/colors.ts`           | New — palette assignment                   |
-| `src/mention.ts`          | New — `@name` parsing                      |
+| `src/mention.ts`          | New — handles and `@name` parsing          |
 | `src/ui/layout.ts`        | New — column splitting                     |
 | `src/ui/subagent-list.ts` | New — the list and its key handling        |
 | `src/ui/status.ts`        | New — one glyph and colour per status       |

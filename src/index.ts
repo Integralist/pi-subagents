@@ -19,20 +19,28 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	getAgentDir,
+	type InputEvent,
+	type InputEventResult,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { type AgentConfig, discoverAgents } from "./agents.ts";
 import { steerSubagent, stopSubagent } from "./control.ts";
+import { assignHandle, parseMention } from "./mention.ts";
 import { modelLabel, resolveModel } from "./model-resolver.ts";
 import { resolveConcurrencyLimit, SubagentQueue } from "./queue.ts";
-import { type SubagentRecord, SubagentRegistry } from "./registry.ts";
-import { inChildContext, runSubagent } from "./runner.ts";
+import {
+	type SubagentRecord,
+	SubagentRegistry,
+	TERMINAL_STATUSES,
+} from "./registry.ts";
+import { describeCause, inChildContext, runSubagent } from "./runner.ts";
 import {
 	COMPLETE_MESSAGE_TYPE,
 	describeCompletion,
 	type RunSubagentFn,
 	renderCompletion,
+	resumeSubagent,
 	type SendMessage,
 	startSubagent,
 	stopFromUi,
@@ -506,8 +514,9 @@ export function createSteerTool(deps: { registry: SubagentRegistry }) {
 			`Redirect a running subagent, by the id ${SPAWN_TOOL_NAME} returned. ` +
 			"The message lands after the subagent's current turn and before its " +
 			"next model call, so it changes what the subagent does next rather " +
-			"than starting it over. A subagent that has already finished cannot " +
-			"be steered.",
+			"than starting it over. A subagent still waiting for a slot takes the " +
+			"message into the task it starts on. A subagent that has already " +
+			"finished cannot be steered.",
 		parameters: Type.Object({
 			id: Type.String({
 				description: `The id ${SPAWN_TOOL_NAME} returned.`,
@@ -521,7 +530,7 @@ export function createSteerTool(deps: { registry: SubagentRegistry }) {
 
 		async execute(_toolCallId, params) {
 			const record = requireRecord(deps.registry, params.id);
-			const result = await steerSubagent(record, params.message);
+			const result = await steerSubagent(record, params.message, deps);
 			if (!result.ok) {
 				throw new Error(`Cannot steer ${nameOf(record)}: ${result.reason}.`);
 			}
@@ -612,6 +621,161 @@ export function configuredLimit(
 	);
 }
 
+/** What the `@name` handler needs to reach a subagent however far along it is. */
+export interface MentionHandlerDeps {
+	registry: SubagentRegistry;
+	queue: SubagentQueue;
+	sendMessage: SendMessage;
+	discover: (cwd: string) => AgentConfig[];
+	/** How a run happens. Injected so a test needs no model. */
+	run?: RunSubagentFn;
+}
+
+/** The agent definition a handle names, for a subagent not yet started. */
+function agentForHandle(
+	agents: AgentConfig[],
+	handle: string,
+): AgentConfig | undefined {
+	return agents.find(
+		(agent) => assignHandle(agent.name, () => false) === handle,
+	);
+}
+
+/**
+ * Route `@name` at the main prompt straight to that subagent.
+ *
+ * The point is that talking to a subagent costs no main-model turn and no main
+ * context: pi is told the input was `handled`, so nothing about the message or
+ * the reply passes through the main conversation at all. That is also why every
+ * outcome is reported with `ctx.ui.notify` rather than as a message — a message
+ * would spend the context this exists to save.
+ *
+ * Dispatch is by how far along the subagent is, which is the specification's own
+ * table: still going means steer it, finished means continue it, and a name that
+ * belongs to an agent file with no subagent behind it yet means start one with
+ * this message as its task.
+ */
+export function createMentionHandler(deps: MentionHandlerDeps) {
+	return async (
+		event: InputEvent,
+		ctx: ExtensionContext,
+	): Promise<InputEventResult> => {
+		// Text an extension submitted is not a person typing a mention, and an
+		// extension has no way to opt out of another's routing. Ours arrives as a
+		// custom message rather than as input, so this guards the general case
+		// rather than a loop of our own making.
+		if (event.source === "extension") {
+			return { action: "continue" };
+		}
+
+		const agents = deps.discover(ctx.cwd);
+		const mention = parseMention(
+			event.text,
+			(handle) =>
+				deps.registry.get(handle) !== undefined ||
+				agentForHandle(agents, handle) !== undefined,
+		);
+
+		if (mention.kind === "passthrough") {
+			// Only `@main ` rewrites anything, and then only by stripping itself.
+			return mention.text === event.text
+				? { action: "continue" }
+				: { action: "transform", text: mention.text };
+		}
+
+		await route(mention.handle, mention.message, agents, ctx, deps);
+		return { action: "handled" };
+	};
+}
+
+/**
+ * Deliver one mention, and say what became of it.
+ *
+ * Nothing here throws: this runs inside pi's input dispatch, where an exception
+ * would surface as an extension error over a prompt the user has already lost.
+ * A refusal is reported and the message is not delivered — sending it to the
+ * main model instead would be a stranger outcome than being told it went
+ * nowhere.
+ */
+async function route(
+	handle: string,
+	message: string,
+	agents: AgentConfig[],
+	ctx: ExtensionContext,
+	deps: MentionHandlerDeps,
+): Promise<void> {
+	const say = (text: string, level: "info" | "warning" = "info") =>
+		ctx.ui.notify(text, level);
+	const record = deps.registry.get(handle);
+
+	// Still going: this is steering, exactly as the tool does it.
+	if (record && !TERMINAL_STATUSES.has(record.status)) {
+		const result = await steerSubagent(record, message, deps);
+		say(
+			result.ok
+				? `Sent to "${handle}".`
+				: `Cannot reach "${handle}": ${result.reason}.`,
+			result.ok ? "info" : "warning",
+		);
+		return;
+	}
+
+	// Freshly read, so a continuation runs under the agent file as it is now —
+	// and so a file that has since been deleted is noticed rather than guessed at.
+	const config = record
+		? agents.find((agent) => agent.name === record.type)
+		: agentForHandle(agents, handle);
+	if (!config) {
+		say(`There is no agent file for "${handle}" any more.`, "warning");
+		return;
+	}
+
+	// The same resolution the tool does, so a mention and a tool call start the
+	// same subagent. An unusable `model:` refuses the message rather than
+	// quietly running the subagent on something else.
+	let choice: ModelChoice;
+	try {
+		choice = await chooseModel(ctx, config.name, config.model, ctx.signal);
+	} catch (error) {
+		say(`Cannot start "${handle}": ${describeCause(error)}`, "warning");
+		return;
+	}
+
+	const options = {
+		ctx,
+		config: config,
+		prompt: message,
+		model: choice.model,
+		thinkingLevel: config.thinking,
+		registry: deps.registry,
+		queue: deps.queue,
+		sendMessage: deps.sendMessage,
+		...(deps.run ? { run: deps.run } : {}),
+	};
+
+	if (record) {
+		const result = resumeSubagent({ ...options, record });
+		if (!result.ok) {
+			say(`Cannot reach "${handle}": ${result.reason}.`, "warning");
+			return;
+		}
+		say(
+			result.startedFresh
+				? `"${handle}" had no stored conversation, so it starts fresh.`
+				: `Continuing "${handle}".`,
+		);
+		return;
+	}
+
+	const started = startSubagent({
+		...options,
+		// The message doubles as the row's description; only its first line, so a
+		// pasted message does not turn the list into a paragraph.
+		description: message.split("\n")[0]?.trim() ?? message,
+	});
+	say(`Started "${started.handle}".`);
+}
+
 export default function (pi: ExtensionAPI): void {
 	// One registry for the session, shared by the tool that fills it and the
 	// tool that reads it, and one queue holding them all to the limit.
@@ -639,6 +803,17 @@ export default function (pi: ExtensionAPI): void {
 	pi.registerTool(createStopTool({ registry, queue }));
 	pi.registerMessageRenderer(COMPLETE_MESSAGE_TYPE, renderCompletion);
 
+	// `@name` at the prompt reaches a subagent without a main-model turn.
+	pi.on(
+		"input",
+		createMentionHandler({
+			registry,
+			queue,
+			sendMessage,
+			discover: discoverAgents,
+		}),
+	);
+
 	// The list is a terminal widget, so it is mounted once the session is up and
 	// only when there is a terminal to mount it in. `print`, `json` and `rpc`
 	// runs have no editor to sit below and nothing to redraw.
@@ -664,6 +839,8 @@ export default function (pi: ExtensionAPI): void {
 						tui,
 						cwd: ctx.cwd,
 						close: () => done(),
+						steer: (steering, message) =>
+							steerSubagent(steering, message, { registry }),
 						stop: (stopping) =>
 							stopFromUi(stopping, { registry, queue }, sendMessage),
 					}),
