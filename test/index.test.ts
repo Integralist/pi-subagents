@@ -238,6 +238,9 @@ describe("extension registration", () => {
 						content: unknown,
 						options?: { placement?: string },
 					) => widgets.push({ key, content, options }),
+					// The list reads the prompt to decide whether an arrow was meant
+					// for it or for the cursor.
+					getEditorText: () => "",
 				},
 			};
 			handlers.get("session_start")?.({}, tuiContext);
@@ -298,24 +301,53 @@ describe("extension registration", () => {
 			expect(widgets[0]?.options?.placement).toBe("belowEditor");
 		});
 
-		it("builds the list from the theme it is handed", () => {
+		/** Build the mounted widget against a fake terminal and editor. */
+		function mount() {
 			const widgets = register().startSession("tui");
 			const factory = widgets[0]?.content as (
 				tui: unknown,
 				theme: unknown,
 			) => SubagentList;
 
-			const redraws: number[] = [];
+			const keyListeners: Array<(data: string) => unknown> = [];
 			const list = factory(
-				{ requestRender: () => redraws.push(1) },
+				{
+					requestRender: () => {},
+					addInputListener: (listener: (data: string) => unknown) => {
+						keyListeners.push(listener);
+						return () => keyListeners.splice(0);
+					},
+				},
 				{
 					fg: (_c: string, text: string) => text,
+					bg: (_c: string, text: string) => text,
 				},
 			);
+			return { list, keyListeners };
+		}
+
+		it("builds the list from the theme it is handed", () => {
+			const { list } = mount();
 
 			expect(list).toBeInstanceOf(SubagentList);
 			expect(list.render(80)).toEqual([]);
 			list.dispose();
+		});
+
+		/**
+		 * Without this the list is drawn but cannot be navigated: it never holds
+		 * focus, so an input listener is the only way keys reach it. And the
+		 * listener has to go when the widget does, or it keeps taking arrows for a
+		 * list that is no longer on screen.
+		 */
+		it("gives the list the terminal's key presses, and takes them back", () => {
+			const { list, keyListeners } = mount();
+
+			expect(keyListeners).toHaveLength(1);
+
+			list.dispose();
+
+			expect(keyListeners).toHaveLength(0);
 		});
 
 		/**

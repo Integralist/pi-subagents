@@ -15,6 +15,9 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,
+	Key,
+	matchesKey,
+	type TuiInputListener,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
@@ -63,6 +66,24 @@ export interface SubagentListOptions {
 	perColumn?: number;
 	/** How long a finished subagent's row stays. */
 	lingerMs?: number;
+	/**
+	 * The prompt's current text.
+	 *
+	 * Arrow keys are only taken when this is empty, so ordinary typing is never
+	 * intercepted. Without it the list takes no arrows at all: there would be no
+	 * way to tell an arrow meant for the list from one meant for the cursor, and
+	 * stealing the cursor's arrows is the one thing here that would annoy daily.
+	 */
+	getEditorText?: () => string;
+	/**
+	 * Subscribe to the terminal's key presses, returning an unsubscribe.
+	 *
+	 * The list sits below the editor and never holds focus, so `handleInput` is
+	 * never called on it — an input listener is the only way keys reach it. Owned
+	 * here rather than by the caller so that `dispose` tears down everything this
+	 * list attached.
+	 */
+	addInputListener?: (listener: TuiInputListener) => () => void;
 	/** Seams for a deterministic test. */
 	now?: () => number;
 	delay?: (fn: () => void, ms: number) => void;
@@ -115,6 +136,7 @@ function renderRow(
 	theme: Theme,
 	width: number,
 	nameColumn: number,
+	selected: boolean,
 ): string {
 	const mark = STATUS_MARK[record.status];
 	const name = truncateToWidth(record.handle, nameColumn, "…", true);
@@ -131,17 +153,18 @@ function renderRow(
 	const tail = percent === "" ? 0 : visibleWidth(percent) + 1;
 	const room = Math.max(0, width - used - tail);
 
-	// Padded only when a percentage follows, which is what right-aligns it.
-	// Without one there is nothing to push over, and the trailing spaces would
-	// fill the row to the terminal's last column for no reason.
+	// Padded when a percentage follows, which is what right-aligns it, and when
+	// the row is selected, so the highlight is a solid block rather than a
+	// ragged one — the eye follows the block. Otherwise there is nothing to push
+	// over and the spaces would fill the row to the terminal's last column.
 	const description = truncateToWidth(
 		record.description,
 		room,
 		"…",
-		percent !== "",
+		percent !== "" || selected,
 	);
 
-	return [
+	const row = [
 		theme.fg(STATUS_COLOR[record.status], mark),
 		" ",
 		colorize(record.color, name),
@@ -149,6 +172,8 @@ function renderRow(
 		theme.fg("muted", description),
 		percent === "" ? "" : ` ${theme.fg("dim", percent)}`,
 	].join("");
+
+	return selected ? theme.bg("selectedBg", row) : row;
 }
 
 /** Pad a rendered cell out to `width`, counting only what is visible. */
@@ -183,9 +208,23 @@ export class SubagentList implements Component {
 	readonly #now: () => number;
 	readonly #delay: (fn: () => void, ms: number) => void;
 	readonly #requestRender: () => void;
-	readonly #unsubscribe: (() => void) | undefined;
+	readonly #getEditorText: (() => string) | undefined;
+	readonly #teardown: Array<() => void> = [];
 	/** Records with a redraw already scheduled, so each is only queued once. */
 	readonly #expiring = new Set<string>();
+	/**
+	 * The selected subagent, by id rather than by position.
+	 *
+	 * A row's position changes as subagents finish and drop out; its identity
+	 * does not. An index would quietly come to mean a different subagent.
+	 */
+	#selectedId: string | undefined;
+	/**
+	 * The width the list was last drawn at, so navigation can lay the columns out
+	 * the same way. Wide enough by default that a key pressed before the first
+	 * draw still finds the columns the list is about to show.
+	 */
+	#lastWidth = 80;
 
 	constructor(options: SubagentListOptions) {
 		this.#registry = options.registry;
@@ -195,9 +234,20 @@ export class SubagentList implements Component {
 		this.#now = options.now ?? Date.now;
 		this.#delay = options.delay ?? laterUnref;
 		this.#requestRender = options.requestRender ?? (() => {});
-		this.#unsubscribe = options.requestRender
-			? this.#registry.onChange(() => this.#handleChange())
-			: undefined;
+		this.#getEditorText = options.getEditorText;
+
+		if (options.requestRender) {
+			this.#teardown.push(this.#registry.onChange(() => this.#handleChange()));
+		}
+		if (options.addInputListener) {
+			this.#teardown.push(
+				options.addInputListener((data) =>
+					// `undefined` rather than `{ consume: false }`: anything the list
+					// did not take has to pass through to the editor untouched.
+					this.handleKey(data) ? { consume: true } : undefined,
+				),
+			);
+		}
 	}
 
 	/**
@@ -230,9 +280,15 @@ export class SubagentList implements Component {
 		}
 	}
 
-	/** Stop watching the registry. Called by pi when the widget goes away. */
+	/**
+	 * Let go of the registry and the keyboard. Called by pi when the widget goes
+	 * away — a listener left attached would keep taking arrows for a list that is
+	 * no longer on screen.
+	 */
 	dispose(): void {
-		this.#unsubscribe?.();
+		for (const stop of this.#teardown.splice(0)) {
+			stop();
+		}
 	}
 
 	/**
@@ -256,12 +312,17 @@ export class SubagentList implements Component {
 			);
 	}
 
-	render(width: number): string[] {
-		const records = this.visible();
-		if (records.length === 0) {
-			return [];
-		}
-
+	/**
+	 * The columns as they would be drawn at `width`, and how wide each one is.
+	 *
+	 * Shared by drawing and navigating, so the two cannot disagree. A terminal
+	 * too narrow for two columns shows one, and `right` must not then move to a
+	 * column the user cannot see.
+	 */
+	#columnsFor(
+		records: SubagentRecord[],
+		width: number,
+	): { columns: SubagentRecord[][]; columnWidth: number } {
 		const wanted = layoutColumns(records, this.#perColumn);
 		const { count, columnWidth } = fitColumns(width, wanted.length);
 		// Re-laid out at the width that actually fits: dropping to fewer columns
@@ -270,13 +331,33 @@ export class SubagentList implements Component {
 			count === wanted.length
 				? wanted
 				: layoutColumns(records, Math.ceil(records.length / count));
+		return { columns, columnWidth };
+	}
+
+	render(width: number): string[] {
+		const records = this.visible();
+		if (records.length === 0) {
+			return [];
+		}
+
+		// Remembered so navigation lays the columns out exactly as they were
+		// drawn. The user can only move through what they can see.
+		this.#lastWidth = width;
+		const { columns, columnWidth } = this.#columnsFor(records, width);
 
 		// One name width across every column, so the whole list lines up rather
 		// than each column finding its own alignment.
 		const nameColumn = nameWidth(records);
+		const selected = this.selectedId;
 		const cells = columns.map((column) =>
 			column.map((record) =>
-				renderRow(record, this.#theme, columnWidth, nameColumn),
+				renderRow(
+					record,
+					this.#theme,
+					columnWidth,
+					nameColumn,
+					record.id === selected,
+				),
 			),
 		);
 		const height = Math.max(...cells.map((column) => column.length));
@@ -294,6 +375,140 @@ export class SubagentList implements Component {
 			lines.push(line.trimEnd());
 		}
 		return lines;
+	}
+
+	/**
+	 * The selected subagent's id, or nothing when the prompt has focus.
+	 *
+	 * A selection whose subagent has since left the list reads as no selection:
+	 * the row is gone, so there is nothing selected on screen, whatever this was
+	 * pointing at.
+	 */
+	get selectedId(): string | undefined {
+		if (this.#selectedId === undefined) {
+			return undefined;
+		}
+		return this.visible().some((record) => record.id === this.#selectedId)
+			? this.#selectedId
+			: undefined;
+	}
+
+	/**
+	 * Where the selection sits in the columns as drawn, if it is on screen.
+	 */
+	#position(
+		columns: SubagentRecord[][],
+	): { column: number; row: number } | undefined {
+		const selected = this.selectedId;
+		if (selected === undefined) {
+			return undefined;
+		}
+
+		for (const [column, records] of columns.entries()) {
+			const row = records.findIndex((record) => record.id === selected);
+			if (row !== -1) {
+				return { column, row };
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * Offer one key press to the list. Returns whether it was taken.
+	 *
+	 * Anything not taken must reach the editor untouched, which is why this
+	 * reports rather than swallowing: a `false` here is the difference between a
+	 * working cursor and a prompt that will not let you move through your own
+	 * text.
+	 */
+	handleKey(data: string): boolean {
+		// Escape is not an arrow, and a user with a half-typed prompt and a
+		// selected row still means to leave the list. Only taken when there is a
+		// selection to leave: escape means a great many things at a prompt, and
+		// swallowing it while the list is idle would take it from all of them.
+		if (matchesKey(data, Key.escape)) {
+			if (this.selectedId === undefined) {
+				return false;
+			}
+			this.#selectedId = undefined;
+			this.#requestRender();
+			return true;
+		}
+
+		// Every arrow belongs to the cursor unless the prompt is empty. With no
+		// way to read the prompt, that cannot be known, so none are taken.
+		if (this.#getEditorText?.() !== "") {
+			return false;
+		}
+
+		const records = this.visible();
+		if (records.length === 0) {
+			return false;
+		}
+
+		const { columns } = this.#columnsFor(records, this.#lastWidth);
+		const at = this.#position(columns);
+
+		if (matchesKey(data, Key.down)) {
+			// Entering the list: the first row, wherever the selection had been.
+			if (!at) {
+				return this.#select(columns[0]?.[0]);
+			}
+			const column = columns[at.column] ?? [];
+			return this.#select(column[Math.min(at.row + 1, column.length - 1)]);
+		}
+
+		if (matchesKey(data, Key.up)) {
+			if (!at) {
+				return false;
+			}
+			// Up past the first row leaves the list, rather than sticking at the
+			// top with escape as the only way back to the prompt.
+			if (at.row === 0) {
+				this.#selectedId = undefined;
+				this.#requestRender();
+				return true;
+			}
+			return this.#select(columns[at.column]?.[at.row - 1]);
+		}
+
+		const sideways = matchesKey(data, Key.right)
+			? 1
+			: matchesKey(data, Key.left)
+				? -1
+				: 0;
+		if (sideways !== 0) {
+			// Nothing to cross to, so the arrow is left to the editor rather than
+			// taken for a move that cannot happen.
+			if (!at || columns.length < 2) {
+				return false;
+			}
+			const target =
+				columns[
+					Math.min(Math.max(at.column + sideways, 0), columns.length - 1)
+				];
+			if (!target) {
+				return false;
+			}
+			// Clamped, because the column moved to may be shorter than this one.
+			return this.#select(target[Math.min(at.row, target.length - 1)]);
+		}
+
+		// Enter opens the selected subagent in Slice 10. Until then it reaches the
+		// editor untouched rather than being quietly swallowed.
+		return false;
+	}
+
+	/** Take a row as the selection, reporting the key as consumed either way. */
+	#select(record: SubagentRecord | undefined): boolean {
+		if (!record) {
+			return false;
+		}
+		if (record.id !== this.#selectedId) {
+			this.#selectedId = record.id;
+			this.#requestRender();
+		}
+		return true;
 	}
 
 	/** Nothing is cached, so there is nothing to throw away. */

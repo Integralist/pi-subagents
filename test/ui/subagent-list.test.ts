@@ -7,11 +7,19 @@ import { ROWS_PER_COLUMN } from "../../src/ui/layout.ts";
 import { DEFAULT_LINGER_MS, SubagentList } from "../../src/ui/subagent-list.ts";
 
 /**
+ * Stands in for whatever `theme.bg("selectedBg", …)` emits. A real escape
+ * sequence, so it does not count towards a row's visible width.
+ */
+const SELECTED_BG = "\x1b[7m";
+
+/**
  * A theme that colours nothing, so an assertion about layout is not also an
- * assertion about the palette. The colour tests build their own.
+ * assertion about the palette. The colour tests build their own. `bg` is the
+ * exception: the selection has to be visible for a test to point at it.
  */
 const plainTheme = {
 	fg: (_color: string, text: string) => text,
+	bg: (_color: string, text: string) => `${SELECTED_BG}${text}\x1b[27m`,
 	bold: (text: string) => text,
 } as unknown as Theme;
 
@@ -67,7 +75,12 @@ function addRunning(count: number): SubagentRecord[] {
 }
 
 function list(
-	options: { perColumn?: number; lingerMs?: number; theme?: Theme } = {},
+	options: {
+		perColumn?: number;
+		lingerMs?: number;
+		theme?: Theme;
+		editorText?: () => string;
+	} = {},
 ) {
 	return new SubagentList({
 		registry,
@@ -75,6 +88,7 @@ function list(
 		perColumn: options.perColumn,
 		lingerMs: options.lingerMs,
 		now: () => clock,
+		getEditorText: options.editorText,
 	});
 }
 
@@ -541,6 +555,473 @@ describe("SubagentList", () => {
 			expect(() => subject.dispose()).not.toThrow();
 			expect(() => addRunning(1)).not.toThrow();
 			expect(plain(subject)).toHaveLength(1);
+		});
+
+		describe("the keyboard", () => {
+			/** A list wired to a fake terminal, with its key listener captured. */
+			function wired() {
+				const listeners: Array<(data: string) => unknown> = [];
+				let removed = 0;
+				const subject = new SubagentList({
+					registry,
+					theme: plainTheme,
+					now: () => clock,
+					getEditorText: () => "",
+					addInputListener: (listener) => {
+						listeners.push(listener);
+						return () => {
+							removed += 1;
+						};
+					},
+				});
+				return {
+					subject,
+					send: (data: string) => listeners[0]?.(data),
+					removed: () => removed,
+				};
+			}
+
+			it("takes the keys it uses, and only those", () => {
+				addRunning(3);
+				const { subject, send } = wired();
+
+				// Consumed, so pi does not also hand it to the editor.
+				expect(send("\x1b[B")).toEqual({ consume: true });
+				expect(subject.selectedId).toBe("sub-0");
+			});
+
+			/**
+			 * `undefined` rather than `{ consume: false }`: everything the list did
+			 * not take has to reach the editor untouched.
+			 */
+			it("passes a key it does not use straight through", () => {
+				addRunning(3);
+				const { send } = wired();
+
+				expect(send("h")).toBeUndefined();
+			});
+
+			// A listener left attached would keep taking arrows for a list that is
+			// no longer on screen.
+			it("lets go of the keyboard when disposed", () => {
+				const { subject, removed } = wired();
+
+				subject.dispose();
+
+				expect(removed()).toBe(1);
+			});
+
+			it("takes no keys at all when nothing subscribed it", () => {
+				addRunning(3);
+				const subject = new SubagentList({
+					registry,
+					theme: plainTheme,
+					getEditorText: () => "",
+				});
+
+				// Still drivable directly, which is what the navigation tests do.
+				expect(subject.handleKey("\x1b[B")).toBe(true);
+			});
+		});
+	});
+});
+
+/**
+ * Navigating the list.
+ *
+ * Keys are fed as the raw sequences a terminal sends, matching the reference
+ * implementation's own tests, and the assertions are on which subagent ends up
+ * selected rather than on any index — a row's position changes as subagents come
+ * and go, but its identity does not.
+ */
+describe("SubagentList navigation", () => {
+	const UP = "\x1b[A";
+	const DOWN = "\x1b[B";
+	const RIGHT = "\x1b[C";
+	const LEFT = "\x1b[D";
+	const ESC = "\x1b";
+	const ENTER = "\r";
+
+	/** A list over `count` running subagents, at an empty prompt by default. */
+	function nav(count: number, text = "") {
+		addRunning(count);
+		return list({ editorText: () => text });
+	}
+
+	/** Feed each key in turn and report what the list did with the last one. */
+	function press(subject: SubagentList, ...keys: string[]): boolean {
+		let consumed = false;
+		for (const key of keys) {
+			consumed = subject.handleKey(key);
+		}
+		return consumed;
+	}
+
+	describe("entering and leaving", () => {
+		// The specification's scenario, quoted.
+		it("Enters the list from an empty prompt", () => {
+			const subject = nav(3);
+
+			press(subject, DOWN);
+
+			expect(subject.selectedId).toBe("sub-0");
+		});
+
+		it("consumes the key that entered the list", () => {
+			expect(press(nav(3), DOWN)).toBe(true);
+		});
+
+		// The specification's scenario, quoted.
+		it("Leaves the list", () => {
+			const subject = nav(3);
+			press(subject, DOWN, DOWN);
+
+			// Then no row is selected.
+			expect(press(subject, ESC)).toBe(true);
+			expect(subject.selectedId).toBeUndefined();
+		});
+
+		/**
+		 * Escape means a great many things at a prompt. Swallowing it when the
+		 * list is not in use would take it away from everything else that wants
+		 * it.
+		 */
+		it("leaves escape alone when no row is selected", () => {
+			expect(press(nav(3), ESC)).toBe(false);
+		});
+
+		// The plan's rule: up past the first row leaves the list, rather than
+		// sticking there with no way back to the prompt but escape.
+		it("leaves the list when it goes up past the first row", () => {
+			const subject = nav(3);
+			press(subject, DOWN);
+
+			expect(press(subject, UP)).toBe(true);
+			expect(subject.selectedId).toBeUndefined();
+		});
+
+		it("ignores up when the list has not been entered", () => {
+			const subject = nav(3);
+
+			expect(press(subject, UP)).toBe(false);
+			expect(subject.selectedId).toBeUndefined();
+		});
+
+		it("has nothing to enter when there are no subagents", () => {
+			const subject = list({ editorText: () => "" });
+
+			expect(press(subject, DOWN)).toBe(false);
+			expect(subject.selectedId).toBeUndefined();
+		});
+	});
+
+	describe("moving within a column", () => {
+		// The specification's scenario, quoted.
+		it("Moves down the list", () => {
+			const subject = nav(3);
+			press(subject, DOWN);
+
+			press(subject, DOWN);
+
+			expect(subject.selectedId).toBe("sub-1");
+		});
+
+		it("moves back up", () => {
+			const subject = nav(3);
+			press(subject, DOWN, DOWN, DOWN);
+			expect(subject.selectedId).toBe("sub-2");
+
+			press(subject, UP);
+
+			expect(subject.selectedId).toBe("sub-1");
+		});
+
+		// Stopping at the bottom, rather than wrapping to the top or falling into
+		// the next column: a list that jumps somewhere unexpected on a held key
+		// is worse than one that stops.
+		it("stops at the last row of the column", () => {
+			const subject = nav(3);
+
+			press(subject, DOWN, DOWN, DOWN, DOWN, DOWN);
+
+			expect(subject.selectedId).toBe("sub-2");
+		});
+
+		it("keeps consuming down at the bottom, rather than letting it through", () => {
+			const subject = nav(3);
+			press(subject, DOWN, DOWN, DOWN);
+
+			expect(press(subject, DOWN)).toBe(true);
+		});
+	});
+
+	describe("moving between columns", () => {
+		// The specification's scenario, quoted. Ten subagents is two columns.
+		it("Moves between columns", () => {
+			const subject = nav(10);
+			subject.render(200);
+			press(subject, DOWN);
+			expect(subject.selectedId).toBe("sub-0");
+
+			press(subject, RIGHT);
+
+			expect(subject.selectedId).toBe("sub-5");
+		});
+
+		it("comes back to the first column", () => {
+			const subject = nav(10);
+			subject.render(200);
+			press(subject, DOWN, RIGHT);
+
+			press(subject, LEFT);
+
+			expect(subject.selectedId).toBe("sub-0");
+		});
+
+		it("keeps its row when it changes column", () => {
+			const subject = nav(10);
+			subject.render(200);
+			press(subject, DOWN, DOWN, DOWN);
+			expect(subject.selectedId).toBe("sub-2");
+
+			press(subject, RIGHT);
+
+			expect(subject.selectedId).toBe("sub-7");
+		});
+
+		/**
+		 * The plan's rule. Six subagents means a second column of one, so row
+		 * three of the first column has no counterpart to move to.
+		 */
+		it("clamps to the last row when the target column is shorter", () => {
+			const subject = nav(6);
+			subject.render(200);
+			press(subject, DOWN, DOWN, DOWN);
+			expect(subject.selectedId).toBe("sub-2");
+
+			press(subject, RIGHT);
+
+			expect(subject.selectedId).toBe("sub-5");
+		});
+
+		/**
+		 * Stopping at the edge, and still taking the key. Letting it fall through
+		 * would move the editor's cursor instead, which is not what someone
+		 * navigating a list means by pressing right.
+		 */
+		it("stays put at the last column, and keeps the key", () => {
+			const subject = nav(6);
+			subject.render(200);
+			press(subject, DOWN, RIGHT);
+
+			expect(press(subject, RIGHT)).toBe(true);
+			expect(subject.selectedId).toBe("sub-5");
+		});
+
+		it("stays put at the first column, and keeps the key", () => {
+			const subject = nav(6);
+			subject.render(200);
+			press(subject, DOWN);
+
+			expect(press(subject, LEFT)).toBe(true);
+			expect(subject.selectedId).toBe("sub-0");
+		});
+
+		// One column means nothing to cross to, and the arrows should not be
+		// taken from the editor for a move that cannot happen.
+		it("leaves sideways arrows alone when there is only one column", () => {
+			const subject = nav(3);
+			press(subject, DOWN);
+
+			expect(press(subject, RIGHT)).toBe(false);
+			expect(press(subject, LEFT)).toBe(false);
+			expect(subject.selectedId).toBe("sub-0");
+		});
+
+		/**
+		 * Navigation has to agree with what was drawn. A terminal too narrow for
+		 * two columns shows one, so right must not move to a column the user
+		 * cannot see.
+		 */
+		it("navigates the columns it actually drew, not the ones it wanted", () => {
+			const subject = nav(10);
+			subject.render(30);
+			press(subject, DOWN);
+
+			expect(press(subject, RIGHT)).toBe(false);
+			expect(subject.selectedId).toBe("sub-0");
+		});
+	});
+
+	describe("when the prompt has text", () => {
+		// The specification's scenario, quoted.
+		it("Ignores arrows when the prompt has text", () => {
+			const subject = nav(3, "hello");
+
+			expect(press(subject, DOWN)).toBe(false);
+			expect(subject.selectedId).toBeUndefined();
+		});
+
+		/**
+		 * The one behaviour that would annoy daily if it were wrong: with text in
+		 * the editor, every arrow belongs to the cursor.
+		 */
+		it.each([
+			["down", "\x1b[B"],
+			["up", "\x1b[A"],
+			["right", "\x1b[C"],
+			["left", "\x1b[D"],
+		])("leaves %s to the cursor", (_name, key) => {
+			let text = "";
+			addRunning(6);
+			const subject = list({ editorText: () => text });
+			subject.render(200);
+			// Enter the list at an empty prompt, then start typing.
+			subject.handleKey("\x1b[B");
+			expect(subject.selectedId).toBe("sub-0");
+			text = "hello";
+
+			expect(subject.handleKey(key)).toBe(false);
+			expect(subject.selectedId).toBe("sub-0");
+		});
+
+		// Escape is not an arrow. Leaving the list is exactly what a user with a
+		// half-typed prompt and a selected row wants.
+		it("still leaves the list on escape", () => {
+			let text = "";
+			addRunning(3);
+			const subject = list({ editorText: () => text });
+			subject.handleKey("\x1b[B");
+			text = "hello";
+
+			expect(subject.handleKey("\x1b")).toBe(true);
+			expect(subject.selectedId).toBeUndefined();
+		});
+
+		// Without a way to read the prompt there is no way to know an arrow was
+		// meant for the cursor, so the list must not take it.
+		it("takes no arrows at all when it cannot read the prompt", () => {
+			addRunning(3);
+			const subject = list();
+
+			expect(subject.handleKey("\x1b[B")).toBe(false);
+			expect(subject.selectedId).toBeUndefined();
+		});
+
+		/**
+		 * Spaces are text. Someone part-way through typing has a cursor to move,
+		 * and guessing that they did not mean it would take the arrow anyway.
+		 */
+		it.each(["   ", "\t", " a "])(
+			"treats a prompt of %o as text, not as empty",
+			(text) => {
+				const subject = nav(3, text);
+
+				expect(press(subject, DOWN)).toBe(false);
+				expect(subject.selectedId).toBeUndefined();
+			},
+		);
+	});
+
+	describe("keys it has no business taking", () => {
+		it.each([
+			["enter", "\r"],
+			["a printable character", "h"],
+			["a control character", "\x03"],
+			["tab", "\t"],
+		])("leaves %s alone", (_name, key) => {
+			const subject = nav(3);
+			press(subject, DOWN);
+
+			expect(subject.handleKey(key)).toBe(false);
+		});
+
+		// Enter opens the selected subagent in Slice 10. Until then it must reach
+		// the editor untouched rather than being quietly swallowed.
+		it("does not yet act on enter", () => {
+			const subject = nav(3);
+			press(subject, DOWN);
+
+			press(subject, ENTER);
+
+			expect(subject.selectedId).toBe("sub-0");
+		});
+	});
+
+	describe("a selection whose subagent goes away", () => {
+		it("forgets a subagent that has left the list", () => {
+			const subject = nav(2);
+			press(subject, DOWN, DOWN);
+			expect(subject.selectedId).toBe("sub-1");
+
+			registry.update("sub-1", { status: "completed" });
+			clock = NOW + DEFAULT_LINGER_MS;
+
+			expect(subject.selectedId).toBeUndefined();
+		});
+
+		// The row is gone, so down should start again from the top rather than
+		// resuming from a position that no longer exists.
+		it("starts again from the top after the selection disappears", () => {
+			const subject = nav(2);
+			press(subject, DOWN, DOWN);
+			registry.update("sub-1", { status: "completed" });
+			clock = NOW + DEFAULT_LINGER_MS;
+
+			press(subject, DOWN);
+
+			expect(subject.selectedId).toBe("sub-0");
+		});
+	});
+
+	describe("showing the selection", () => {
+		it("marks the selected row and only that row", () => {
+			const subject = nav(3);
+			subject.render(80);
+			press(subject, DOWN, DOWN);
+
+			const lines = subject.render(80);
+
+			expect(lines[1]).toContain(SELECTED_BG);
+			expect(lines[0]).not.toContain(SELECTED_BG);
+			expect(lines[2]).not.toContain(SELECTED_BG);
+		});
+
+		it("marks nothing when nothing is selected", () => {
+			const subject = nav(3);
+
+			for (const line of subject.render(80)) {
+				expect(line).not.toContain(SELECTED_BG);
+			}
+		});
+
+		it("moves the mark with the selection", () => {
+			const subject = nav(3);
+			press(subject, DOWN, DOWN, DOWN);
+
+			const lines = subject.render(80);
+
+			expect(lines[2]).toContain(SELECTED_BG);
+			expect(lines[1]).not.toContain(SELECTED_BG);
+		});
+
+		/**
+		 * A ragged highlight is worse than none: the eye follows the block, so it
+		 * has to be the full width of the column.
+		 *
+		 * The subagent deliberately has no context reading. A row *with* a
+		 * percentage is padded anyway to right-align it, so it would pass this
+		 * whether selection padded it or not.
+		 */
+		it("highlights the whole width of the row", () => {
+			registry.add(record({ contextPercent: null }));
+			const subject = list({ editorText: () => "" });
+			press(subject, "\x1b[B");
+
+			const line = subject.render(80)[0] ?? "";
+
+			expect(subject.selectedId).toBe("abc123");
+			expect(visibleWidth(line)).toBe(80);
 		});
 	});
 });

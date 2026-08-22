@@ -653,6 +653,11 @@ export default function (pi: ExtensionAPI): void {
 					registry,
 					theme,
 					requestRender: () => tui.requestRender(),
+					// The list never holds focus, so an input listener is the only way
+					// arrow keys reach it. It reads the prompt to decide whether an
+					// arrow was meant for the list or for the cursor.
+					addInputListener: (listener) => tui.addInputListener(listener),
+					getEditorText: () => ctx.ui.getEditorText(),
 				}),
 			{ placement: "belowEditor" },
 		);

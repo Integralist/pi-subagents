@@ -1475,7 +1475,7 @@ That has a direct consequence for how the work is handed out.
 - **Execution**: **Main thread.** Key wiring you will iterate on. A sealed
   executor cannot tell you the navigation feels wrong.
 
-- [ ] **Task 9.1**: Handle keys.
+- [x] **Task 9.1**: Handle keys.
 
   Escape sequences, as used by the reference implementation's tests
   (`tintinweb-pi-subagents/test/fleet-list.test.ts:10-16`):
@@ -1490,17 +1490,95 @@ That has a direct consequence for how the work is handed out.
   leaves it. Left/right move between columns, clamping to the last row
   when the target column is shorter.
 
-- [ ] **Task 9.2**: Capture arrows only at an empty prompt.
+  > [!NOTE]
+  > **The sequences are only test input.** The code matches keys with
+  > pi-tui's `matchesKey(data, Key.up)`, which handles both legacy
+  > sequences and the Kitty keyboard protocol — hardcoding `\x1b[A` would
+  > work today and silently stop working under Kitty. Verified that it
+  > discriminates: a bare `\x1b` matches `escape` and not `up`. The tests
+  > still feed the raw sequences, so they exercise the real decoding.
+  >
+  > **The list never holds focus, so `handleInput` is never called on it.**
+  > `Component.handleInput` only fires for the focused component, and the
+  > focus belongs to the editor. `tui.addInputListener` is the only way
+  > keys reach a widget: it sees everything and returns `{ consume: true }`
+  > to swallow a key, or `undefined` to pass it on. The subscription is
+  > owned by the component so `dispose` takes back both it and the
+  > registry listener — a listener left attached would keep taking arrows
+  > for a list no longer on screen.
+  >
+  > **Selection is held as an id, not an index.** Rows move as subagents
+  > finish and drop out, so an index would quietly come to mean a
+  > different subagent. `selectedId` also reports nothing when its
+  > subagent has left the list, which is what makes `down` start again
+  > from the top rather than resuming from a row that no longer exists.
+  >
+  > **Navigation lays the columns out at the width the list was last drawn
+  > at**, through the same helper `render` uses. Otherwise `right` could
+  > move to a second column that a narrow terminal never showed.
+  >
+  > Three rules the sketch leaves open, all decided the same way — a key
+  > the list is using is a key the list keeps. `down` at the bottom of a
+  > column stops there and stays consumed; sideways at the first or last
+  > column likewise. Letting those fall through would move the editor's
+  > cursor instead, which is not what someone navigating a list means.
+  > But with only **one** column, sideways arrows are *not* taken: there
+  > is nothing to cross to, so the arrow belongs to the editor.
+  >
+  > **Enter is deliberately not handled.** It opens the selected subagent
+  > in Slice 10; until then it reaches the editor untouched rather than
+  > being quietly swallowed.
+  >
+  > **Selection had to be drawn to mean anything**, which the sketch does
+  > not mention. The selected row gets `theme.bg("selectedBg", …)` and is
+  > padded to the full column width even when it has no percentage, so the
+  > highlight is a solid block — the eye follows the block, and a ragged
+  > one is worse than none.
+
+- [x] **Task 9.2**: Capture arrows only at an empty prompt.
 
   With any text in the editor, arrows do ordinary cursor movement. This
   is the one behaviour that will annoy daily if it is wrong, so test it
   directly.
 
-- [ ] **Task 9.3**: Key-driven tests.
+  > [!NOTE]
+  > `ctx.ui.getEditorText()` is the reader; it is passed in rather than
+  > reached for, so the component stays testable.
+  >
+  > **With no way to read the prompt, no arrows are taken at all.** There
+  > would be no way to tell an arrow meant for the list from one meant for
+  > the cursor, and guessing wrong in that direction is the failure that
+  > would annoy daily.
+  >
+  > **Whitespace is text.** A prompt of spaces does not count as empty:
+  > someone part-way through typing has a cursor to move. Pinned by a
+  > test, because trimming looks like the more generous reading and is the
+  > wrong one.
+  >
+  > **Escape is exempt from the guard**, and the order matters. It is not
+  > an arrow, and a user with a half-typed prompt and a selected row still
+  > means to leave the list — checking the prompt first would trap them in
+  > it. Escape is only taken when there *is* a selection to leave, since
+  > escape means a great many things at a prompt.
+
+- [x] **Task 9.3**: Key-driven tests.
 
   Feed sequences, assert the selected row after each. Cover entering,
   moving, crossing columns, leaving via escape, and the non-empty
   prompt case.
+
+  > [!NOTE]
+  > 87 tests over the list, of which 47 are navigation. Every one of the
+  > specification's five navigation scenarios is quoted as an `it` name.
+  >
+  > **Mutation testing found four weak tests here, and the pattern is
+  > worth carrying into Slice 10.** Three came from asserting only on
+  > `selectedId` and not on whether the key was *consumed* — an
+  > unclamped move leaves the selection where it was, so the selection
+  > assertion passes and only the consume result differs. The fourth was a
+  > selected-row test whose subagent had a context percentage, which pads
+  > the row anyway; it proved nothing about selection padding until the
+  > subagent was given no reading at all.
 
 ### Slice 10: Opening a subagent and steering it there
 
