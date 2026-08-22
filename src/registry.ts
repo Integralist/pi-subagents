@@ -45,6 +45,15 @@ export interface SubagentRecord {
 	/** Absent until the run ends. */
 	outcome?: SubagentOutcome;
 	/**
+	 * Why this run was cut short, when the reason is not in the outcome itself.
+	 *
+	 * A stopped outcome says only that the subagent did not finish. This says
+	 * what stopped it — a turn limit here, a user in Slice 6 — so the completion
+	 * notice can tell the main model that the answer it is reading is truncated
+	 * rather than final.
+	 */
+	stoppedBecause?: string;
+	/**
 	 * How much of the context window is used, or null when unknown — which is
 	 * the case before the first turn ends and again right after a compaction.
 	 * Null is not zero, and the list renders it blank rather than `0%`.

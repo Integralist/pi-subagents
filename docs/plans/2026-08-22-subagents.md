@@ -957,11 +957,11 @@ That has a direct consequence for how the work is handed out.
   answer; one that ignores the warning is stopped.
 - **Consumes**: `SubagentRecord`, and the `turn_end` subscription from
   Task 3.2.
-- **Produces**: Turn-counting behaviour inside `runSubagent`.
+- **Produces**: `watchTurns` in `src/turns.ts`.
 - **Execution**: **`/tasks` candidate** once Slice 3 lands — turn counting
   inside an existing subscription is mechanical.
 
-- [ ] **Task 5.1**: Count turns and inject the warning.
+- [x] **Task 5.1**: Count turns and inject the warning.
 
   In the existing `session.subscribe()` handler, on `turn_end`
   increment the record's turn count. At `maxTurns`, steer once:
@@ -977,14 +977,54 @@ That has a direct consequence for how the work is handed out.
   (`dist/core/agent-session.d.ts:371`). Guard with a `warned` flag so
   it fires exactly once.
 
-- [ ] **Task 5.2**: Hard-abort after the grace turns.
+  > [!NOTE]
+  > **Delivered as its own subscription in `src/turns.ts`, not inside
+  > the existing one.** That instruction predates Task 3.2, which put
+  > the `turn_end` subscription in `trackContextUsage` — a function with
+  > no business enforcing anything. `session.subscribe()` takes any
+  > number of listeners, so `watchTurns` takes its own and the two stay
+  > independently testable and independently removable.
+  >
+  > Turns are counted whether or not there is a limit, since the list
+  > shows the count either way.
+  >
+  > `steer` and `abort` are both promises nobody awaits, called from
+  > inside the child's event dispatch, so both go through a helper that
+  > swallows the rejection: a warning that cannot be delivered is a lost
+  > courtesy, and neither is worth a failed run — or an unhandled
+  > rejection in the host process.
+
+- [x] **Task 5.2**: Hard-abort after the grace turns.
 
   At `maxTurns + graceTurns` call `session.abort()`
   (`dist/core/agent-session.d.ts:433`) and mark the outcome incomplete.
   Grace defaults to 3.
 
   `maxTurns` resolution order: caller parameter, then frontmatter
-  `max_turns:`, then unlimited.
+  `maxTurns:`, then unlimited.
+
+  > [!NOTE]
+  > **The frontmatter key is `maxTurns:`, not `max_turns:`.** This line
+  > said the latter; Task 1.3's own `AgentConfig` sketch and
+  > `src/agents.ts` both say the former, and every other frontmatter
+  > field is camelCase. Corrected here rather than in the code.
+  >
+  > **The caller parameter did not exist until now.** The resolution
+  > order named three levels and only two were reachable, so
+  > `spawn_subagent` gained `max_turns`, following exactly the pattern
+  > `model` and `thinking` already set in Task 2.2. Unlimited-by-default
+  > is this line's own decision, and worth keeping in view: it means an
+  > agent file with no `maxTurns:` runs until it stops itself.
+  >
+  > "Marked incomplete" needed somewhere to live. An aborted session
+  > already summarises as a `stopped` outcome, but that says only that
+  > the subagent did not finish, leaving the main model to read a
+  > truncated answer as a final one. `SubagentRecord` gained
+  > `stoppedBecause?: string`, written *before* the abort so it is on
+  > the record by the time the run settles and the notice is composed,
+  > which now reads "was stopped because … Its answer, if any, is
+  > incomplete." Slice 6 should reuse the field for a subagent the user
+  > stops.
 
 ### Slice 6: Steering and stopping
 
@@ -1275,6 +1315,7 @@ That has a direct consequence for how the work is handed out.
 | `src/registry.ts`           | New — records, status, context tracking       |
 | `src/spawn.ts`              | New — detached runs, completion notices       |
 | `src/queue.ts`              | New — concurrency limit                       |
+| `src/turns.ts`              | New — turn counting, warning, hard stop       |
 | `src/control.ts`            | New — steer and stop                          |
 | `src/model-resolver.ts`     | New — fuzzy model matching                    |
 | `src/colors.ts`             | New — palette assignment                      |

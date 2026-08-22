@@ -450,6 +450,55 @@ describe("spawn_subagent", () => {
 	});
 });
 
+describe("spawn_subagent turn limit", () => {
+	it("lets the caller's turn limit win over the agent file's", async () => {
+		const { tool, run } = harness({
+			agents: [agentConfig({ maxTurns: 4 })],
+			hang: true,
+		});
+
+		await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, max_turns: 9 },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run.mock.calls[0]?.[0].config.maxTurns).toBe(9);
+	});
+
+	it("uses the agent file's limit when the caller names none", async () => {
+		const { tool, run } = harness({
+			agents: [agentConfig({ maxTurns: 4 })],
+			hang: true,
+		});
+
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+
+		expect(run.mock.calls[0]?.[0].config.maxTurns).toBe(4);
+	});
+
+	it("leaves a subagent unlimited when neither names one", async () => {
+		const { tool, run } = harness({ hang: true });
+
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+
+		expect(run.mock.calls[0]?.[0].config.maxTurns).toBeUndefined();
+	});
+
+	it("leaves the turn limit optional in the schema", () => {
+		const { tool } = harness();
+		const schema = tool.parameters as {
+			required?: string[];
+			properties: Record<string, unknown>;
+		};
+
+		expect(schema.properties.max_turns).toBeDefined();
+		expect(schema.required ?? []).not.toContain("max_turns");
+	});
+});
+
 describe("spawn_subagent under a concurrency limit", () => {
 	it("queues a spawn when every slot is taken, and says so", async () => {
 		const { tool, run, registry } = harness({ limit: 1, hang: true });

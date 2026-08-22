@@ -34,6 +34,7 @@ import {
 	runSubagent,
 	type SubagentOutcome,
 } from "./runner.ts";
+import { type TurnLimit, watchTurns } from "./turns.ts";
 
 /** Marks the completion notice, for the renderer and for anything filtering. */
 export const COMPLETE_MESSAGE_TYPE = "subagent-complete";
@@ -102,7 +103,13 @@ export function describeCompletion(
 		parts.push(`Subagent ${record.id} failed.`);
 		parts.push(outcome.error ?? `Subagent "${record.type}" gave no reason.`);
 	} else if (outcome.status === "stopped") {
-		parts.push(`${name} was stopped before finishing.`);
+		// Saying why, and saying plainly that the answer is partial. A bare
+		// "stopped" leaves the main model to read a truncated answer as a final
+		// one, which is the whole point of marking a run incomplete.
+		const why = record.stoppedBecause
+			? ` because ${record.stoppedBecause}`
+			: "";
+		parts.push(`${name} was stopped${why}. Its answer, if any, is incomplete.`);
 	} else {
 		parts.push(`${name} finished.`);
 	}
@@ -114,6 +121,17 @@ export function describeCompletion(
 	}
 
 	return parts.join("\n\n");
+}
+
+/**
+ * The turn limit for this agent, if its file sets one.
+ *
+ * An agent file with no `maxTurns:` gets no limit at all — neither the
+ * specification nor the plan names a default, and inventing one would cut
+ * short every agent written before there was a limit to write down.
+ */
+function turnLimit(config: AgentConfig): TurnLimit | undefined {
+	return config.maxTurns ? { maxTurns: config.maxTurns } : undefined;
 }
 
 /**
@@ -131,7 +149,8 @@ async function runAndAnnounce(
 	run: RunSubagentFn,
 ): Promise<void> {
 	const { registry, sendMessage } = opts;
-	let stopTracking: (() => void) | undefined;
+	// Everything watching the child session, torn down together when it ends.
+	const stopWatching: Array<() => void> = [];
 
 	try {
 		const outcome = await run({
@@ -146,14 +165,18 @@ async function runAndAnnounce(
 			// one on purpose is Slice 6's job.
 			onSession: (session) => {
 				// Guarded on its own. This runs inside the runner's crash guard, so a
-				// throw here would come back as a failed subagent — telemetry breaking
-				// the very work it exists to watch. A run nobody can report the context
-				// use of is still a run worth finishing.
+				// throw here would come back as a failed subagent — the watchers
+				// breaking the very work they exist to watch. A run nobody can report
+				// the context use of is still a run worth finishing.
 				try {
 					registry.update(record.id, { session });
-					stopTracking = trackContextUsage(session, registry, record.id);
+					stopWatching.push(
+						trackContextUsage(session, registry, record.id),
+						watchTurns(session, registry, record.id, turnLimit(opts.config)),
+					);
 				} catch {
-					// The list will show a blank where the percentage would be.
+					// The list will show a blank where the percentage would be, and an
+					// unlimited subagent runs to its own conclusion.
 				}
 			},
 		});
@@ -180,7 +203,9 @@ async function runAndAnnounce(
 		// Nothing left to tell, and nobody to tell it to. The record already
 		// carries whatever was known before this went wrong.
 	} finally {
-		stopTracking?.();
+		for (const stop of stopWatching) {
+			stop();
+		}
 	}
 }
 

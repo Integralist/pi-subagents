@@ -287,6 +287,14 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 					description: "Effort level. Defaults to the current level.",
 				}),
 			),
+			max_turns: Type.Optional(
+				Type.Integer({
+					minimum: 1,
+					description:
+						"Turns before the subagent is told to wrap up. Defaults to " +
+						"whatever its agent file sets, or no limit.",
+				}),
+			),
 		}),
 
 		// `signal` is still read — the model dialog must die with the turn — but it
@@ -336,7 +344,13 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 			// comes back as a message of its own when there is one.
 			const record = startSubagent({
 				ctx,
-				config: { ...config, tools },
+				// The caller's turn limit wins; the agent file's applies otherwise;
+				// naming neither leaves the subagent unlimited.
+				config: {
+					...config,
+					tools,
+					maxTurns: params.max_turns ?? config.maxTurns,
+				},
 				prompt: params.prompt,
 				description: params.description,
 				model: choice.model,

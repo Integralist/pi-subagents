@@ -74,13 +74,21 @@ function stubSend() {
 	return { sendMessage, delivered: arrived.promise };
 }
 
-/** The parts of a child session that handover touches. */
+/**
+ * The parts of a child session that handover touches.
+ *
+ * More than one watcher subscribes — context use and turns — so each gets its
+ * own unsubscribe, and a test can assert that every subscription was undone
+ * without having to know how many there are.
+ */
 function stubSession() {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
-	const unsubscribe = vi.fn();
+	const unsubscribes: Array<ReturnType<typeof vi.fn>> = [];
 	const session = {
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
+			const unsubscribe = vi.fn();
+			unsubscribes.push(unsubscribe);
 			return unsubscribe;
 		},
 		getContextUsage: () => ({
@@ -88,13 +96,19 @@ function stubSession() {
 			contextWindow: 200_000,
 			percent: 12,
 		}),
+		steer: vi.fn(async () => {}),
+		abort: vi.fn(async () => {}),
 	};
 	return {
 		session,
-		unsubscribe,
-		endTurn: () => {
+		steer: session.steer,
+		abort: session.abort,
+		unsubscribes,
+		endTurn: (times = 1) => {
 			const event = { type: "turn_end" } as unknown as AgentSessionEvent;
-			for (const listener of listeners) listener(event);
+			for (let i = 0; i < times; i++) {
+				for (const listener of listeners) listener(event);
+			}
 		},
 	};
 }
@@ -341,6 +355,25 @@ describe("startSubagent completion", () => {
 		expect(delivered(send).message.content).toContain("got halfway");
 	});
 
+	/**
+	 * The specification's "its result is marked as incomplete". A bare "stopped"
+	 * leaves the main model reading a truncated answer as a final one.
+	 */
+	it("says why a subagent was stopped and that its answer is partial", async () => {
+		const { registry } = start(run, send);
+		registry.update("abc123", {
+			stoppedBecause: "it passed its turn limit without finishing",
+		});
+
+		run.finish({ status: "stopped", output: "got halfway" });
+		await send.delivered;
+
+		const content = delivered(send).message.content;
+		expect(content).toContain("passed its turn limit");
+		expect(content).toMatch(/incomplete/i);
+		expect(content).toContain("got halfway");
+	});
+
 	it("says so when a subagent finished without answering", async () => {
 		start(run, send);
 
@@ -403,6 +436,76 @@ describe("startSubagent completion", () => {
  * anywhere above it. Node reports that as an unhandled rejection, which by
  * default takes the whole host process — the user's session — down with it.
  */
+describe("startSubagent turn limits", () => {
+	/** A run that hands its session over and then never finishes. */
+	function runWith(stub: ReturnType<typeof stubSession>) {
+		return vi.fn((opts: RunSubagentOptions) => {
+			opts.onSession?.(stub.session as never);
+			return new Promise<SubagentOutcome>(() => {});
+		});
+	}
+
+	function launch(config: AgentConfig, stub: ReturnType<typeof stubSession>) {
+		const registry = new SubagentRegistry();
+		startSubagent({
+			ctx,
+			config,
+			prompt: "review",
+			description: "review",
+			registry,
+			queue: new SubagentQueue(5),
+			sendMessage: send.sendMessage as unknown as SendMessage,
+			run: runWith(stub),
+			newId: () => "abc123",
+			now: () => 1_000,
+		});
+		return registry;
+	}
+
+	it("counts the subagent's turns onto its record", () => {
+		const stub = stubSession();
+		const registry = launch(agentConfig(), stub);
+
+		stub.endTurn(3);
+
+		expect(registry.get("abc123")?.turns).toBe(3);
+	});
+
+	it("holds a subagent to the limit its agent file sets", async () => {
+		const stub = stubSession();
+		launch(agentConfig({ maxTurns: 2 }), stub);
+
+		stub.endTurn(2);
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(stub.steer).toHaveBeenCalledTimes(1);
+	});
+
+	it("stops one that runs past the limit and its grace", async () => {
+		const stub = stubSession();
+		const registry = launch(agentConfig({ maxTurns: 2 }), stub);
+
+		stub.endTurn(5);
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(stub.abort).toHaveBeenCalledTimes(1);
+		expect(registry.get("abc123")?.stoppedBecause).toMatch(/turn limit/i);
+	});
+
+	// No `maxTurns:` in the agent file means no limit at all.
+	it("lets an agent file with no limit run on", async () => {
+		const stub = stubSession();
+		const registry = launch(agentConfig(), stub);
+
+		stub.endTurn(40);
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(stub.steer).not.toHaveBeenCalled();
+		expect(stub.abort).not.toHaveBeenCalled();
+		expect(registry.get("abc123")?.turns).toBe(40);
+	});
+});
+
 describe("startSubagent when delivery fails", () => {
 	it("leaves no unhandled rejection behind", async () => {
 		const rejections: unknown[] = [];
@@ -549,7 +652,10 @@ describe("startSubagent context tracking", () => {
 		gate.settle({ status: "completed", output: "done" });
 		await send.delivered;
 
-		expect(stub.unsubscribe).toHaveBeenCalledTimes(1);
+		expect(stub.unsubscribes).not.toHaveLength(0);
+		expect(
+			stub.unsubscribes.every((stop) => stop.mock.calls.length === 1),
+		).toBe(true);
 	});
 });
 
