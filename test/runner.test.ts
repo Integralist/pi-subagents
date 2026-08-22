@@ -6,7 +6,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agents.ts";
-import { runSubagent } from "../src/runner.ts";
+import { runSubagent, SubagentError } from "../src/runner.ts";
 
 /**
  * A stand-in for one assistant reply. Only the fields `runSubagent` reads are
@@ -283,15 +283,15 @@ describe("runSubagent", () => {
 		const stub = stubFactory();
 		stub.session.prompt.mockRejectedValueOnce(new Error("model exploded"));
 
-		await expect(
-			runSubagent({
-				ctx: fakeContext(),
-				config,
-				prompt: "review this",
-				createSession: stub.createSession,
-			}),
-		).rejects.toThrow("model exploded");
+		// Task 1.5 requires this to be contained rather than rethrown.
+		const outcome = await runSubagent({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			createSession: stub.createSession,
+		});
 
+		expect(outcome.status).toBe("failed");
 		expect(stub.session.dispose).toHaveBeenCalledOnce();
 	});
 
@@ -329,5 +329,133 @@ describe("runSubagent", () => {
 
 		expect(stub.createSession).not.toHaveBeenCalled();
 		expect(outcome.status).toBe("stopped");
+	});
+});
+
+/**
+ * Containment. Subagents share the host process, so an error that escapes
+ * `runSubagent` is the user's own session going down. Every one of these
+ * asserts that nothing propagates.
+ */
+describe("runSubagent failure containment", () => {
+	// The plan's acceptance criterion for Task 1.5, quoted.
+	it("given a session factory that throws, reports failed with the error message and propagates nothing", async () => {
+		const createSession = vi.fn(async () => {
+			throw new Error("no model configured");
+		});
+
+		const outcome = await runSubagent({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			createSession,
+		});
+
+		expect(outcome.status).toBe("failed");
+		expect(outcome.error).toContain("no model configured");
+		expect(outcome.output).toBe("");
+	});
+
+	it("names the agent in the failure so one bad agent is identifiable", async () => {
+		const createSession = vi.fn(async () => {
+			throw new Error("boom");
+		});
+
+		const outcome = await runSubagent({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			createSession,
+		});
+
+		expect(outcome.error).toContain("reviewer");
+	});
+
+	it("contains a thrown value that is not an Error at all", async () => {
+		const createSession = vi.fn(async () => {
+			// Nothing stops a dependency throwing a string or undefined.
+			throw "just a string";
+		});
+
+		const outcome = await runSubagent({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			createSession,
+		});
+
+		expect(outcome.status).toBe("failed");
+		expect(outcome.error).toContain("just a string");
+	});
+
+	it("contains a dispose that throws, without losing the run's outcome", async () => {
+		const stub = stubFactory({ reply: [assistant("the answer")] });
+		stub.session.dispose.mockImplementation(() => {
+			throw new Error("dispose exploded");
+		});
+
+		const outcome = await runSubagent({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			createSession: stub.createSession,
+		});
+
+		// The run succeeded; a broken teardown must not turn it into a failure.
+		expect(outcome.status).toBe("completed");
+		expect(outcome.output).toBe("the answer");
+	});
+
+	it("observes the rejection of an abort instead of dropping the promise", async () => {
+		// `abort()` is called from an event listener, so a rejection it leaves
+		// unobserved has nowhere to surface but the process. Watching for
+		// `unhandledRejection` cannot prove this — the test runner installs its
+		// own handler — so `abort()` returns a thenable that records whether the
+		// caller supplied a rejection callback at all. Dropping the promise never
+		// calls `then`; awaiting or catching it does.
+		let rejectionObserved = false;
+		const recordingThenable = {
+			// biome-ignore lint/suspicious/noThenProperty: a deliberate thenable — being treated as a promise is the whole point of the probe
+			then(_onFulfilled?: unknown, onRejected?: unknown) {
+				if (typeof onRejected === "function") {
+					rejectionObserved = true;
+				}
+				return Promise.resolve();
+			},
+		};
+
+		const controller = new AbortController();
+		const stub = stubFactory({
+			reply: [assistant("interrupted", "aborted")],
+			onPrompt: () => {
+				controller.abort();
+			},
+		});
+		stub.session.abort.mockReturnValue(recordingThenable);
+
+		const outcome = await runSubagent({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			signal: controller.signal,
+			createSession: stub.createSession,
+		});
+
+		expect(outcome.status).toBe("stopped");
+		expect(rejectionObserved).toBe(true);
+	});
+});
+
+describe("SubagentError", () => {
+	it("records which agent failed and keeps the original cause", () => {
+		const cause = new Error("underlying");
+		const error = new SubagentError("reviewer", cause);
+
+		expect(error).toBeInstanceOf(Error);
+		expect(error.name).toBe("SubagentError");
+		expect(error.agentName).toBe("reviewer");
+		expect(error.cause).toBe(cause);
+		expect(error.message).toContain("reviewer");
+		expect(error.message).toContain("underlying");
 	});
 });

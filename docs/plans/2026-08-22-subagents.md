@@ -318,7 +318,7 @@ That has a direct consequence for how the work is handed out.
   "stubbed session factory" the specification names as its primary
   testing seam.
 
-- [ ] **Task 1.5**: Wrap every run so no subagent failure escapes.
+- [x] **Task 1.5**: Wrap every run so no subagent failure escapes.
 
   ```typescript
   export class SubagentError extends Error {
@@ -334,6 +334,42 @@ That has a direct consequence for how the work is handed out.
 
   Given a session factory that throws, when a subagent runs, then the
   outcome is `failed` with the error message and nothing propagates.
+
+  Implemented as an outer `try` around the whole run, so the loader,
+  both managers, the session factory, and the prompt are all inside it.
+  Two holes left by Task 1.4 are now closed, and neither was in the
+  plan:
+
+  - **Teardown could decide the outcome.** A `dispose()` that threw in
+    the `finally` replaced a good answer with a failure. It is now
+    guarded separately.
+  - **`void session.abort()` dropped a promise.** `void` does not
+    observe a rejection, and that call runs from an `abort` event
+    listener, so a rejecting `abort()` had nowhere to surface but the
+    process — the exact crash this task exists to prevent.
+
+  > [!NOTE]
+  > **`bindExtensions({ onError })` is not called, and would be inert
+  > if it were.** With `noExtensions: true` and no
+  > `additionalExtensionPaths`, the child loads zero extensions
+  > (`dist/core/resource-loader.js:315-317`), so no extension can raise
+  > an error for the listener to receive. The nuance worth remembering:
+  > `noExtensions` suppresses only the *settings-configured*
+  > extensions; anything in `additionalExtensionPaths` still loads. A
+  > future change that passes that option to the child would both need
+  > this listener and re-open the recursion hole Task 1.6 guards.
+
+  `SubagentError` takes `agentName`, not the plan's `agentId` — there
+  are no subagent ids until the registry in Slice 3. It is constructed
+  but never thrown, since this function returns outcomes; it exists to
+  give every failure one message shape naming the agent, and to keep
+  the original `cause` attached.
+
+  One test seam is worth knowing about: **`unhandledRejection` cannot
+  be asserted on under vitest**, which installs its own handler, so a
+  test watching for it passes even against the dropped-promise bug.
+  The rejection is instead probed with a thenable that records whether
+  the caller supplied a rejection callback.
 
 - [ ] **Task 1.6**: Add the recursion guard.
 

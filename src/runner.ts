@@ -52,6 +52,42 @@ export interface SubagentOutcome {
 }
 
 /**
+ * A subagent run that ended in a thrown error rather than a reply.
+ *
+ * Constructed but deliberately never thrown: `runSubagent` returns outcomes, so
+ * this exists to give every failure one message shape that names the agent, and
+ * to keep the original cause attached for a caller that wants to log it.
+ */
+export class SubagentError extends Error {
+	constructor(
+		readonly agentName: string,
+		cause: unknown,
+	) {
+		super(`subagent "${agentName}" failed: ${describeCause(cause)}`, { cause });
+		this.name = "SubagentError";
+	}
+}
+
+/**
+ * Turn an unknown thrown value into something readable. A dependency is free to
+ * throw a string, or `undefined`, and that must still produce a usable message
+ * rather than "[object Object]".
+ */
+function describeCause(cause: unknown): string {
+	if (cause instanceof Error) {
+		return cause.message;
+	}
+	if (typeof cause === "string") {
+		return cause;
+	}
+	try {
+		return JSON.stringify(cause) ?? String(cause);
+	} catch {
+		return String(cause);
+	}
+}
+
+/**
  * The shape of an assistant reply this module reads. Pi types the transcript as
  * a union of message kinds; only these fields are needed to decide an outcome,
  * so the union is narrowed structurally rather than by importing the full type
@@ -159,7 +195,28 @@ function buildLoader(cwd: string, config: AgentConfig): DefaultResourceLoader {
 	});
 }
 
+/**
+ * Run a subagent, containing every failure.
+ *
+ * This is the boundary that makes running subagents in the host process safe:
+ * a child that throws must come back as a failed outcome, never as an exception
+ * in the user's own session. Treat any path that can throw past here as a bug.
+ */
 export async function runSubagent(
+	opts: RunSubagentOptions,
+): Promise<SubagentOutcome> {
+	try {
+		return await runSubagentUnguarded(opts);
+	} catch (error) {
+		return {
+			status: "failed",
+			output: "",
+			error: new SubagentError(opts.config.name, error).message,
+		};
+	}
+}
+
+async function runSubagentUnguarded(
 	opts: RunSubagentOptions,
 ): Promise<SubagentOutcome> {
 	const { ctx, config, prompt, signal } = opts;
@@ -170,6 +227,8 @@ export async function runSubagent(
 		return { status: "stopped", output: "" };
 	}
 
+	// Inside the guard: building the loader reads the filesystem and resolves
+	// packages, and either can fail before a session exists at all.
 	const loader = buildLoader(ctx.cwd, config);
 	await loader.reload();
 
@@ -187,8 +246,12 @@ export async function runSubagent(
 	});
 
 	// `PromptOptions` carries no abort signal, so stopping the child means
-	// calling `abort()` on it when the caller's signal fires.
-	const onAbort = () => void session.abort();
+	// calling `abort()` on it when the caller's signal fires. The rejection
+	// handler is not optional: this runs from an event listener, so a rejected
+	// `abort()` has nowhere to surface but the process itself.
+	const onAbort = () => {
+		void Promise.resolve(session.abort()).catch(() => {});
+	};
 	signal?.addEventListener("abort", onAbort, { once: true });
 
 	try {
@@ -196,6 +259,12 @@ export async function runSubagent(
 		return summariseOutcome(session.messages);
 	} finally {
 		signal?.removeEventListener("abort", onAbort);
-		session.dispose();
+		// Teardown must not decide the outcome. A `dispose()` that throws would
+		// otherwise replace a perfectly good answer with a failure.
+		try {
+			session.dispose();
+		} catch {
+			// Nothing useful to do: the run is already over.
+		}
 	}
 }
