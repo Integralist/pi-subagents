@@ -26,24 +26,38 @@ Acceptance criteria and scope:
 ## Prerequisites & Dependencies
 
 Pi runtime, as peer dependencies — the extension loads inside the host
-`pi` process and must bind to the host's copies, never its own:
+`pi` process and must bind to the host's copies, never its own. Pi
+bundles these and requires a `"*"` range, not a floor
+(`pi-coding-agent/docs/packages.md`, "Dependencies"):
 
 ```json
 "peerDependencies": {
-  "@earendil-works/pi-ai": ">=0.84.0",
-  "@earendil-works/pi-coding-agent": ">=0.84.0",
-  "@earendil-works/pi-tui": ">=0.84.0"
+  "@earendil-works/pi-ai": "*",
+  "@earendil-works/pi-coding-agent": "*",
+  "@earendil-works/pi-tui": "*",
+  "typebox": "*"
 }
 ```
 
-Runtime dependency: `typebox` for tool parameter schemas. Pi package
-installation uses production installs, so anything needed at runtime
-must sit in `dependencies`, not `devDependencies`
-(`pi-coding-agent/docs/extensions.md`, "Extension Packaging").
+> [!IMPORTANT]
+> **`typebox` is a bundled peer, not a runtime dependency.** Pi's own
+> `dependencies` pin `typebox@1.3.7`, and `packages.md` names it
+> alongside the `@earendil-works/*` packages as something to declare as
+> a peer and never bundle. Declaring it in `dependencies` would install
+> a second copy whose `Type` symbols fail Pi's schema identity checks.
+> The same list also includes `@earendil-works/pi-agent-core`; add it
+> as a peer only once something here imports it.
 
-Dev dependencies: `vitest`, `@biomejs/biome`, `typescript`,
-`@types/node`, plus the three Pi packages pinned to a concrete version
-for typechecking.
+Third-party runtime dependencies — none so far — belong in
+`dependencies`. Pi package installation uses production installs
+(`npm install --omit=dev`), so anything needed at runtime must not sit
+in `devDependencies` (`pi-coding-agent/docs/extensions.md:150`).
+
+Dev dependencies, pinned exactly so the toolchain typechecks against
+what Pi actually loads: `vitest@4.1.11`, `@biomejs/biome@2.5.10`,
+`typescript@7.0.2`, `@types/node@24.13.3` (24.x to match the Node 24
+runtime, not the 26.x latest), `typebox@1.3.7`, and the three Pi
+packages at `0.84.2`.
 
 > [!IMPORTANT]
 > **No Cucumber.js.** The spec's Gherkin is the definition of done, but
@@ -134,7 +148,7 @@ That has a direct consequence for how the work is handed out.
 
   Add `.gitignore` covering `node_modules/`, `dist/`, `*.log`.
 
-- [ ] **Task 1.2**: Create `package.json` declaring the Pi manifest.
+- [x] **Task 1.2**: Create `package.json` declaring the Pi manifest.
 
   ```json
   {
