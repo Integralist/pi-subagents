@@ -728,14 +728,38 @@ That has a direct consequence for how the work is handed out.
   > `queued`, because Slice 4 compares that count against the
   > concurrency limit and counting the queue would wedge it shut.
 
-- [ ] **Task 3.2**: Track context-window use per subagent.
+- [x] **Task 3.2**: Track context-window use per subagent.
 
-  `session.getContextUsage()` returns
+  `session.getContextUsage()` returns `ContextUsage | undefined`, where
+  `ContextUsage` is
   `{ tokens: number | null, contextWindow: number, percent: number | null }`
   (`dist/core/extensions/types.d.ts:193-199`,
   `dist/core/agent-session.d.ts:616`). Read it on each `turn_end` from
   `session.subscribe()` and store `percent` on the record. `percent` is
   null right after compaction; render a blank rather than `0%`.
+
+  > [!NOTE]
+  > **Two corrections to the sketch above, both verified against the
+  > installed SDK.** `getContextUsage()` is typed `ContextUsage |
+  > undefined`, not `ContextUsage` — so there are three separate ways the
+  > figure can be unknown: no usage object, a null `percent`, or a read
+  > that threw. `readContextPercent` folds all three to null, because zero
+  > would claim an empty context rather than an unknown one.
+  >
+  > `session.subscribe()` emits the `AgentEvent` spelling of `turn_end`,
+  > `{ type, message, toolResults }` (`pi-agent-core/dist/types.d.ts:382`).
+  > The `turnIndex` field belongs to the extension bus's separate
+  > `TurnEndEvent` (`dist/core/extensions/types.d.ts:556`) and is not
+  > available here — Slice 5 will have to count turns itself rather than
+  > read an index off this event.
+  >
+  > Delivered as `trackContextUsage(session, registry, idOrHandle)`,
+  > returning the session's own unsubscribe. It takes a
+  > `ContextUsageSource` — `Pick<AgentSession, "subscribe" |
+  > "getContextUsage">` — so a test supplies a stub rather than a live
+  > session. The listener runs inside the child's event dispatch, so
+  > nothing in it may throw: the read is guarded, and updating a record
+  > that has already gone is a no-op.
 
 - [ ] **Task 3.3**: Assign a colour per subagent in `src/colors.ts`.
 

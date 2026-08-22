@@ -160,3 +160,62 @@ export class SubagentRegistry {
 		}
 	}
 }
+
+/**
+ * The slice of `AgentSession` that context tracking needs.
+ *
+ * Narrowed to two methods so a test can hand over a stub instead of standing up
+ * a real session, and so this module never grows a dependency on the rest of
+ * the session surface.
+ */
+export type ContextUsageSource = Pick<
+	AgentSession,
+	"subscribe" | "getContextUsage"
+>;
+
+/**
+ * Read the usage figure, or admit to not knowing it.
+ *
+ * Three different things mean the same thing to the list — no usage object at
+ * all, a null `percent` in the moments after a compaction, and a read that
+ * threw. All become null, which renders as a blank. Zero would be a lie: it
+ * says the context is empty when the truth is that nobody knows.
+ */
+function readContextPercent(session: ContextUsageSource): number | null {
+	try {
+		return session.getContextUsage()?.percent ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Keep one record's context reading current for as long as its subagent runs.
+ *
+ * The reading is taken at `turn_end` because that is when the provider has just
+ * reported its token usage; sampling at any other event would re-read a figure
+ * that has not moved.
+ *
+ * The listener runs inside the child session's own event dispatch, so it must
+ * not throw — an exception here would surface in the host's session rather than
+ * in the subagent that caused it. Nothing in it can: reading is guarded, and
+ * updating a record that has since gone is a no-op.
+ *
+ * Returns the session's unsubscribe function, so a caller that finishes with a
+ * subagent can stop listening.
+ */
+export function trackContextUsage(
+	session: ContextUsageSource,
+	registry: SubagentRegistry,
+	idOrHandle: string,
+): () => void {
+	return session.subscribe((event) => {
+		if (event.type !== "turn_end") {
+			return;
+		}
+
+		registry.update(idOrHandle, {
+			contextPercent: readContextPercent(session),
+		});
+	});
+}

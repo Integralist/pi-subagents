@@ -1,8 +1,14 @@
+import type {
+	AgentSessionEvent,
+	ContextUsage,
+} from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
+	type ContextUsageSource,
 	type SubagentRecord,
 	SubagentRegistry,
 	type SubagentStatus,
+	trackContextUsage,
 } from "../src/registry.ts";
 
 /**
@@ -195,5 +201,149 @@ describe("SubagentRegistry", () => {
 
 			expect(listener).toHaveBeenCalledTimes(1);
 		});
+	});
+});
+
+/** The one event that matters, shaped as `session.subscribe()` emits it. */
+function turnEnd(): AgentSessionEvent {
+	return {
+		type: "turn_end",
+		message: { role: "assistant", content: [] },
+		toolResults: [],
+	} as unknown as AgentSessionEvent;
+}
+
+function turnStart(): AgentSessionEvent {
+	return { type: "turn_start" } as unknown as AgentSessionEvent;
+}
+
+function usage(percent: number | null): ContextUsage {
+	return {
+		tokens: percent === null ? null : 1_000,
+		contextWindow: 200_000,
+		percent,
+	};
+}
+
+/**
+ * A session that only does what tracking asks of it: hand out a subscription
+ * and report usage. `emit` stands in for the agent finishing a turn.
+ */
+function stubSession(readUsage: () => ContextUsage | undefined) {
+	const listeners: Array<(event: AgentSessionEvent) => void> = [];
+	const unsubscribe = vi.fn();
+	const getContextUsage = vi.fn(readUsage);
+
+	const session = {
+		subscribe: (listener: (event: AgentSessionEvent) => void) => {
+			listeners.push(listener);
+			return unsubscribe;
+		},
+		getContextUsage,
+	} as unknown as ContextUsageSource;
+
+	return {
+		session,
+		getContextUsage,
+		unsubscribe,
+		emit: (event: AgentSessionEvent) => {
+			for (const listener of listeners) listener(event);
+		},
+	};
+}
+
+function registryWith(id: string): SubagentRegistry {
+	const registry = new SubagentRegistry();
+	registry.add(record(id));
+	return registry;
+}
+
+describe("trackContextUsage", () => {
+	it("stores the percentage each time a turn ends", () => {
+		const registry = registryWith("abc123");
+		const stub = stubSession(() => usage(37));
+		trackContextUsage(stub.session, registry, "abc123");
+
+		stub.emit(turnEnd());
+
+		expect(registry.get("abc123")?.contextPercent).toBe(37);
+	});
+
+	it("ignores every event that is not a turn ending", () => {
+		const registry = registryWith("abc123");
+		const stub = stubSession(() => usage(37));
+		trackContextUsage(stub.session, registry, "abc123");
+
+		stub.emit(turnStart());
+
+		expect(stub.getContextUsage).not.toHaveBeenCalled();
+		expect(registry.get("abc123")?.contextPercent).toBeNull();
+	});
+
+	// Null is not zero: the list renders a blank instead of a misleading "0%".
+	it("keeps a null percentage null after a compaction", () => {
+		const registry = registryWith("abc123");
+		const stub = stubSession(() => usage(null));
+		trackContextUsage(stub.session, registry, "abc123");
+		registry.update("abc123", { contextPercent: 80 });
+
+		stub.emit(turnEnd());
+
+		expect(registry.get("abc123")?.contextPercent).toBeNull();
+	});
+
+	// `getContextUsage()` is typed `ContextUsage | undefined`.
+	it("treats no usage at all as unknown rather than zero", () => {
+		const registry = registryWith("abc123");
+		const stub = stubSession(() => undefined);
+		trackContextUsage(stub.session, registry, "abc123");
+		registry.update("abc123", { contextPercent: 80 });
+
+		stub.emit(turnEnd());
+
+		expect(registry.get("abc123")?.contextPercent).toBeNull();
+	});
+
+	it("hands back the session's own unsubscribe", () => {
+		const registry = registryWith("abc123");
+		const stub = stubSession(() => usage(37));
+
+		const stop = trackContextUsage(stub.session, registry, "abc123");
+		stop();
+
+		expect(stub.unsubscribe).toHaveBeenCalledTimes(1);
+	});
+
+	// This listener runs inside the child's event dispatch, so a throw here
+	// would surface in the host session rather than in the subagent.
+	it("swallows a failure to read usage instead of breaking the turn", () => {
+		const registry = registryWith("abc123");
+		const stub = stubSession(() => {
+			throw new Error("no usage for you");
+		});
+		trackContextUsage(stub.session, registry, "abc123");
+
+		expect(() => stub.emit(turnEnd())).not.toThrow();
+		expect(registry.get("abc123")?.contextPercent).toBeNull();
+	});
+
+	it("does nothing when the subagent is no longer registered", () => {
+		const registry = new SubagentRegistry();
+		const stub = stubSession(() => usage(37));
+		trackContextUsage(stub.session, registry, "vanished");
+
+		expect(() => stub.emit(turnEnd())).not.toThrow();
+	});
+
+	it("tells the registry's watchers that the record moved", () => {
+		const registry = registryWith("abc123");
+		const stub = stubSession(() => usage(37));
+		trackContextUsage(stub.session, registry, "abc123");
+		const listener = vi.fn();
+		registry.onChange(listener);
+
+		stub.emit(turnEnd());
+
+		expect(listener).toHaveBeenCalledTimes(1);
 	});
 });
