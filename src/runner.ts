@@ -11,6 +11,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
+	type AgentSession,
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
 	createAgentSession,
@@ -69,6 +70,15 @@ export interface RunSubagentOptions {
 	thinkingLevel?: ThinkingLevel;
 	signal?: AbortSignal;
 	createSession?: SessionFactory;
+	/**
+	 * Handed the child's session once it exists and before it is prompted.
+	 *
+	 * The runner builds the session, prompts it and disposes it, so without this
+	 * nothing outside can reach it. Context tracking needs it from the first turn,
+	 * and Slice 6's steering will need it for the life of the run. Called inside
+	 * the crash guard: a callback that throws costs this run, not the host.
+	 */
+	onSession?: (session: AgentSession) => void;
 }
 
 export interface SubagentOutcome {
@@ -290,6 +300,8 @@ async function runSubagentUnguarded(
 		sessionManager: SessionManager.inMemory(ctx.cwd),
 		settingsManager: SettingsManager.create(ctx.cwd, getAgentDir()),
 	});
+
+	opts.onSession?.(session);
 
 	// `PromptOptions` carries no abort signal, so stopping the child means
 	// calling `abort()` on it when the caller's signal fires. The rejection

@@ -560,6 +560,78 @@ describe("runSubagent recursion guard", () => {
 	});
 });
 
+describe("runSubagent session handover", () => {
+	// Nothing outside the runner can otherwise reach the child's session: the
+	// runner builds it, prompts it and disposes it. Context tracking and, later,
+	// steering both need a reference to it.
+	it("hands the child's session to the caller", async () => {
+		const stub = stubFactory();
+		const seen: unknown[] = [];
+
+		await runSubagent({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			createSession: stub.createSession,
+			onSession: (session) => seen.push(session),
+		});
+
+		expect(seen).toEqual([stub.session]);
+	});
+
+	// Tracking must be listening before the first turn, or it misses it.
+	it("hands it over before the session is prompted", async () => {
+		const order: string[] = [];
+		const stub = stubFactory({
+			onPrompt: () => {
+				order.push("prompt");
+			},
+		});
+
+		await runSubagent({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			createSession: stub.createSession,
+			onSession: () => order.push("onSession"),
+		});
+
+		expect(order).toEqual(["onSession", "prompt"]);
+	});
+
+	// It runs inside the crash guard, so a caller that throws here costs the
+	// run rather than the host session.
+	it("contains a handover that throws", async () => {
+		const stub = stubFactory();
+
+		const outcome = await runSubagent({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			createSession: stub.createSession,
+			onSession: () => {
+				throw new Error("tracking blew up");
+			},
+		});
+
+		expect(outcome.status).toBe("failed");
+		expect(outcome.error).toContain("tracking blew up");
+	});
+
+	it("says nothing when the caller does not ask for the session", async () => {
+		const stub = stubFactory();
+
+		const outcome = await runSubagent({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			createSession: stub.createSession,
+		});
+
+		expect(outcome.status).toBe("completed");
+	});
+});
+
 describe("SubagentError", () => {
 	it("records which agent failed and keeps the original cause", () => {
 		const cause = new Error("underlying");

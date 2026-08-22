@@ -2,8 +2,11 @@
  * pi-subagents — delegate work to focused subagents that run as nested
  * in-process sessions.
  *
- * Registers `spawn_subagent`, which the main agent calls with the name of an
- * agent defined under `.pi/agents/` and a task for it.
+ * Registers two tools. `spawn_subagent` takes the name of an agent defined
+ * under `.pi/agents/` and a task for it, and returns an id straight away —
+ * the subagent then works in the background and its answer arrives in the
+ * conversation on its own. `get_subagent_result` reads that answer back on
+ * demand, for a caller that would rather ask than wait to be told.
  */
 
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -16,9 +19,19 @@ import {
 import { Type } from "typebox";
 import { type AgentConfig, discoverAgents } from "./agents.ts";
 import { modelLabel, resolveModel } from "./model-resolver.ts";
-import { inChildContext, runSubagent, type SubagentOutcome } from "./runner.ts";
+import { type SubagentRecord, SubagentRegistry } from "./registry.ts";
+import { inChildContext, runSubagent } from "./runner.ts";
+import {
+	COMPLETE_MESSAGE_TYPE,
+	describeCompletion,
+	type RunSubagentFn,
+	renderCompletion,
+	type SendMessage,
+	startSubagent,
+} from "./spawn.ts";
 
 export const SPAWN_TOOL_NAME = "spawn_subagent";
+export const RESULT_TOOL_NAME = "get_subagent_result";
 
 /**
  * Every effort level pi accepts, `off` included. A plain string `enum` rather
@@ -34,10 +47,12 @@ const THINKING_LEVELS = [
 	"max",
 ] as const satisfies readonly ThinkingLevel[];
 
-/** What the tool reports back for logs and, from Slice 3, the subagent list. */
+/** What the tool reports back for logs and for the subagent list. */
 export interface SpawnDetails {
+	/** How anything else refers to this subagent afterwards. */
+	id: string;
 	agent: string;
-	status: SubagentOutcome["status"];
+	status: SubagentRecord["status"];
 	description: string;
 	/** Tool names the agent asked for that pi does not have. */
 	unknownTools: string[];
@@ -49,15 +64,13 @@ export interface SpawnDetails {
  */
 export interface SpawnToolDeps {
 	discover: (cwd: string) => AgentConfig[];
-	run: (opts: {
-		ctx: ExtensionContext;
-		config: AgentConfig;
-		prompt: string;
-		model?: Model<Api>;
-		thinkingLevel?: ThinkingLevel;
-		signal?: AbortSignal;
-	}) => Promise<SubagentOutcome>;
+	run: RunSubagentFn;
 	getKnownTools: () => string[];
+	/** Where launched subagents are recorded, shared with the result tool. */
+	registry: SubagentRegistry;
+	sendMessage: SendMessage;
+	/** Seam for a deterministic test. */
+	newId?: () => string;
 }
 
 /**
@@ -190,10 +203,15 @@ function checkToolNames(
 	return { tools: tools.length > 0 ? tools : undefined, unknownTools };
 }
 
-/** Render an outcome as text for the model. */
-function describeOutcome(
-	agentName: string,
-	outcome: SubagentOutcome,
+/**
+ * What the model is told the instant a subagent is under way.
+ *
+ * Everything knowable at launch belongs here rather than in the completion
+ * notice: a warning that arrives with the answer, minutes later, has missed
+ * its moment. The answer itself is not here, because there is not one yet.
+ */
+function describeStart(
+	record: SubagentRecord,
 	unknownTools: string[],
 	choice: ModelChoice,
 ): string {
@@ -203,34 +221,24 @@ function describeOutcome(
 		// Dismissing the dialog leaves the parent's model in play. Saying so keeps
 		// that from being an invisible decision.
 		parts.push(
-			"No model was chosen for this subagent, so it ran on the current " +
-				"model.",
+			"No model was chosen for this subagent, so it is running on the " +
+				"current model.",
 		);
 	}
 
 	if (unknownTools.length > 0) {
 		parts.push(
-			`Warning: subagent "${agentName}" asks for unknown tool(s) ` +
+			`Warning: subagent "${record.type}" asks for unknown tool(s) ` +
 				`${unknownTools.join(", ")}; they were ignored.`,
 		);
 	}
 
-	if (outcome.status === "failed") {
-		// Reported verbatim: an outcome's `error` already names its agent, so
-		// prefixing here would say "reviewer" twice.
-		parts.push(
-			outcome.error ??
-				`The "${agentName}" subagent failed for no stated reason.`,
-		);
-	} else if (outcome.status === "stopped") {
-		parts.push(`The "${agentName}" subagent was stopped before finishing.`);
-	}
-
-	if (outcome.output) {
-		parts.push(outcome.output);
-	} else if (outcome.status === "completed") {
-		parts.push(`The "${agentName}" subagent finished without saying anything.`);
-	}
+	parts.push(
+		`Subagent "${record.type}" started with id ${record.id}. It runs in the ` +
+			"background and its result will arrive here on its own. Carry on with " +
+			`other work; call ${RESULT_TOOL_NAME} with that id to read the result ` +
+			"before then.",
+	);
 
 	return parts.join("\n\n");
 }
@@ -269,6 +277,8 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 			),
 		}),
 
+		// `signal` is still read — the model dialog must die with the turn — but it
+		// is deliberately not handed to the run itself. See `startSubagent`.
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			// A subagent must not spawn subagents; that would fork the host
 			// process without bound.
@@ -310,27 +320,34 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 				signal,
 			);
 
-			const outcome = await deps.run({
+			// Not awaited: the subagent is launched and the call is over. Its answer
+			// comes back as a message of its own when there is one.
+			const record = startSubagent({
 				ctx,
 				config: { ...config, tools },
 				prompt: params.prompt,
+				description: params.description,
 				model: choice.model,
 				// The caller's choice wins; the agent file's applies otherwise;
 				// naming neither inherits the parent's.
 				thinkingLevel: (params.thinking as ThinkingLevel) ?? config.thinking,
-				signal,
+				registry: deps.registry,
+				sendMessage: deps.sendMessage,
+				run: deps.run,
+				...(deps.newId ? { newId: deps.newId } : {}),
 			});
 
 			return {
 				content: [
 					{
 						type: "text" as const,
-						text: describeOutcome(config.name, outcome, unknownTools, choice),
+						text: describeStart(record, unknownTools, choice),
 					},
 				],
 				details: {
+					id: record.id,
 					agent: config.name,
-					status: outcome.status,
+					status: record.status,
 					description: params.description,
 					unknownTools,
 				} satisfies SpawnDetails,
@@ -339,7 +356,64 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 	});
 }
 
+/**
+ * Reading a subagent's answer back on demand.
+ *
+ * The answer arrives on its own when the subagent finishes, so this exists for
+ * the model that wants it sooner, or that has been handed an id and no longer
+ * has the notice in view.
+ */
+export function createResultTool(deps: { registry: SubagentRegistry }) {
+	return defineTool({
+		name: RESULT_TOOL_NAME,
+		label: "Get Subagent Result",
+		description:
+			"Read the result of a subagent started with " +
+			`${SPAWN_TOOL_NAME}, by the id that returned. A subagent still ` +
+			"working has no result yet; its answer arrives on its own when it " +
+			"finishes, so there is no need to poll for it.",
+		parameters: Type.Object({
+			id: Type.String({
+				description: `The id ${SPAWN_TOOL_NAME} returned.`,
+			}),
+		}),
+
+		async execute(_toolCallId, params) {
+			const record = deps.registry.get(params.id);
+			if (!record) {
+				const known = deps.registry.list();
+				throw new Error(
+					`No subagent with id "${params.id}". ` +
+						(known.length > 0
+							? `Known ids: ${known.map((r) => r.id).join(", ")}.`
+							: "No subagents have been started in this session."),
+				);
+			}
+
+			const text = record.outcome
+				? describeCompletion(record, record.outcome)
+				: `Subagent "${record.type}" (${record.id}) is still working. ` +
+					"Its result will arrive here when it finishes.";
+
+			return {
+				content: [{ type: "text" as const, text }],
+				details: {
+					id: record.id,
+					agent: record.type,
+					status: record.status,
+					description: record.description,
+					unknownTools: [],
+				} satisfies SpawnDetails,
+			};
+		},
+	});
+}
+
 export default function (pi: ExtensionAPI): void {
+	// One registry for the session, shared by the tool that fills it and the
+	// tool that reads it.
+	const registry = new SubagentRegistry();
+
 	pi.registerTool(
 		createSpawnTool({
 			discover: discoverAgents,
@@ -347,6 +421,13 @@ export default function (pi: ExtensionAPI): void {
 			// Read lazily: other extensions register tools too, and the full set
 			// is only settled once the session is running.
 			getKnownTools: () => pi.getAllTools().map((tool) => tool.name),
+			registry,
+			// Bound, because it is called later from a background continuation
+			// that has no `pi` of its own.
+			sendMessage: pi.sendMessage.bind(pi),
 		}),
 	);
+
+	pi.registerTool(createResultTool({ registry }));
+	pi.registerMessageRenderer(COMPLETE_MESSAGE_TYPE, renderCompletion);
 }

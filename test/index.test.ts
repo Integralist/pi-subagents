@@ -9,9 +9,12 @@ import type { AgentConfig } from "../src/agents.ts";
 import extension, {
 	buildToolDescription,
 	createSpawnTool,
+	RESULT_TOOL_NAME,
 	SPAWN_TOOL_NAME,
 } from "../src/index.ts";
+import { SubagentRegistry } from "../src/registry.ts";
 import { runInChildContext, type SubagentOutcome } from "../src/runner.ts";
+import type { SendMessage } from "../src/spawn.ts";
 
 function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	return {
@@ -112,27 +115,61 @@ interface Harness {
 	tool: ToolDefinition;
 	run: ReturnType<typeof vi.fn>;
 	discover: ReturnType<typeof vi.fn>;
+	registry: SubagentRegistry;
+	sendMessage: ReturnType<typeof vi.fn>;
+	/** Resolves once the completion notice has been delivered. */
+	delivered: Promise<void>;
 }
 
+/**
+ * The spawn tool over a stubbed runner.
+ *
+ * Spawning is detached now, so the answer never reaches the tool result. A
+ * test that cares about the answer awaits `delivered` and reads the notice.
+ */
 function harness(
 	options: {
 		agents?: AgentConfig[];
 		knownTools?: string[];
 		outcome?: SubagentOutcome;
+		/** A run that never finishes, so waiting on it would hang the test. */
+		hang?: boolean;
 	} = {},
 ): Harness {
 	const discover = vi.fn(() => options.agents ?? [agentConfig()]);
 	const run = vi.fn(
 		async (): Promise<SubagentOutcome> =>
-			options.outcome ?? { status: "completed", output: "looks fine" },
+			options.hang
+				? new Promise<SubagentOutcome>(() => {})
+				: (options.outcome ?? { status: "completed", output: "looks fine" }),
 	);
+
+	let arrived!: () => void;
+	const delivered = new Promise<void>((resolve) => {
+		arrived = resolve;
+	});
+	const sendMessage = vi.fn((_message: unknown, _options?: unknown) => {
+		arrived();
+	});
+
+	const registry = new SubagentRegistry();
 	const tool = createSpawnTool({
 		discover,
 		run,
 		getKnownTools: () =>
 			options.knownTools ?? ["read", "bash", "edit", "write"],
+		registry,
+		sendMessage: sendMessage as unknown as SendMessage,
+		newId: () => "sub-1",
 	});
-	return { tool, run, discover };
+	return { tool, run, discover, registry, sendMessage, delivered };
+}
+
+/** The text of the completion notice the harness captured. */
+function noticeText(sendMessage: ReturnType<typeof vi.fn>): string {
+	const call = sendMessage.mock.calls[0];
+	if (!call) throw new Error("no completion notice was delivered");
+	return (call[0] as { content: string }).content;
 }
 
 const VALID_ARGS = {
@@ -149,16 +186,34 @@ beforeEach(() => {
 });
 
 describe("extension registration", () => {
-	it("registers the spawn tool", () => {
+	function register() {
 		const registered: ToolDefinition[] = [];
+		const renderers: string[] = [];
 		const pi = {
 			registerTool: (tool: ToolDefinition) => registered.push(tool),
 			getAllTools: () => [],
+			registerMessageRenderer: (customType: string) =>
+				renderers.push(customType),
+			sendMessage: vi.fn(),
 		} as unknown as ExtensionAPI;
 
 		extension(pi);
+		return { registered, renderers };
+	}
 
-		expect(registered.map((t) => t.name)).toContain(SPAWN_TOOL_NAME);
+	it("registers the spawn tool", () => {
+		expect(register().registered.map((t) => t.name)).toContain(SPAWN_TOOL_NAME);
+	});
+
+	it("registers the tool that reads a result back", () => {
+		expect(register().registered.map((t) => t.name)).toContain(
+			RESULT_TOOL_NAME,
+		);
+	});
+
+	// Without a renderer the notice shows up as raw text in the transcript.
+	it("registers a renderer for the completion notice", () => {
+		expect(register().renderers).toContain("subagent-complete");
 	});
 });
 
@@ -181,7 +236,26 @@ describe("buildToolDescription", () => {
 });
 
 describe("spawn_subagent", () => {
-	it("returns the subagent's output as the tool result", async () => {
+	// The plan's acceptance criterion for Task 3.4, quoted: spawning returns
+	// immediately with an id rather than the answer.
+	// Over a run that never finishes: if the tool waited for the subagent, this
+	// test would hang rather than fail.
+	it("returns an id without waiting for the subagent", async () => {
+		const { tool, registry } = harness({ hang: true });
+
+		const result = await tool.execute(
+			"call-1",
+			VALID_ARGS,
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(resultText(result)).toContain("sub-1");
+		expect(registry.get("sub-1")?.status).toBe("running");
+	});
+
+	it("keeps the subagent's output out of the immediate result", async () => {
 		const { tool } = harness({
 			outcome: { status: "completed", output: "found two bugs" },
 		});
@@ -194,7 +268,33 @@ describe("spawn_subagent", () => {
 			ctx,
 		);
 
-		expect(resultText(result)).toContain("found two bugs");
+		expect(resultText(result)).not.toContain("found two bugs");
+	});
+
+	it("delivers the subagent's output once it finishes", async () => {
+		const { tool, sendMessage, delivered } = harness({
+			outcome: { status: "completed", output: "found two bugs" },
+		});
+
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+		await delivered;
+
+		expect(noticeText(sendMessage)).toContain("found two bugs");
+	});
+
+	it("records the subagent so the result can be read back", async () => {
+		const { tool, registry } = harness();
+
+		const result = await tool.execute(
+			"call-1",
+			VALID_ARGS,
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect((result.details as { id: string }).id).toBe("sub-1");
+		expect(registry.get("sub-1")).toBeDefined();
 	});
 
 	it("passes the prompt and the named agent through to the runner", async () => {
@@ -217,13 +317,31 @@ describe("spawn_subagent", () => {
 		expect(discover).toHaveBeenCalledWith("/tmp/project");
 	});
 
-	it("hands the caller's abort signal to the runner", async () => {
+	/**
+	 * The opposite of what Slice 1 wanted. The tool call ends the moment it
+	 * returns an id, taking its signal with it, so handing that signal to a
+	 * background run would abort every subagent immediately.
+	 */
+	it("keeps the caller's abort signal away from the runner", async () => {
 		const { tool, run } = harness();
-		const signal = new AbortController().signal;
+		const controller = new AbortController();
 
-		await tool.execute("call-1", VALID_ARGS, signal, undefined, ctx);
+		await tool.execute("call-1", VALID_ARGS, controller.signal, undefined, ctx);
 
-		expect(run.mock.calls[0]?.[0].signal).toBe(signal);
+		expect(run.mock.calls[0]?.[0].signal).toBeUndefined();
+	});
+
+	it("keeps running after the tool call that started it is aborted", async () => {
+		const { tool, sendMessage, delivered } = harness({
+			outcome: { status: "completed", output: "still finished" },
+		});
+		const controller = new AbortController();
+
+		await tool.execute("call-1", VALID_ARGS, controller.signal, undefined, ctx);
+		controller.abort();
+		await delivered;
+
+		expect(noticeText(sendMessage)).toContain("still finished");
 	});
 
 	it("honours a thinking level set in the agent file", async () => {
@@ -281,14 +399,12 @@ describe("spawn_subagent", () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
-	it("reports a failed subagent as a result rather than a tool error", async () => {
-		// The delegation itself worked; the subagent's failure is information the
-		// main agent should be able to reason about, not a malfunction.
-		const { tool } = harness({
+	it("reports a failed subagent in a notice rather than a tool error", async () => {
+		const { tool, sendMessage, delivered } = harness({
 			outcome: {
 				status: "failed",
 				output: "",
-				error: "the provider refused",
+				error: 'subagent "reviewer" failed: it ran out of road',
 			},
 		});
 
@@ -299,26 +415,24 @@ describe("spawn_subagent", () => {
 			undefined,
 			ctx,
 		);
+		await delivered;
 
-		expect(resultText(result)).toContain("the provider refused");
-		expect((result.details as { status: string }).status).toBe("failed");
+		// The spawn itself succeeded — a rejected execute would have failed this
+		// test on the await above — and the subagent is what failed.
+		expect((result.details as { status: string }).status).toBe("running");
+		expect(noticeText(sendMessage)).toContain("it ran out of road");
 	});
 
 	it("reports a stopped subagent with whatever it managed to say", async () => {
-		const { tool } = harness({
+		const { tool, sendMessage, delivered } = harness({
 			outcome: { status: "stopped", output: "got halfway" },
 		});
 
-		const result = await tool.execute(
-			"call-1",
-			VALID_ARGS,
-			undefined,
-			undefined,
-			ctx,
-		);
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+		await delivered;
 
-		expect(resultText(result)).toContain("got halfway");
-		expect((result.details as { status: string }).status).toBe("stopped");
+		expect(noticeText(sendMessage)).toContain("got halfway");
+		expect(noticeText(sendMessage)).toMatch(/stopped/i);
 	});
 });
 

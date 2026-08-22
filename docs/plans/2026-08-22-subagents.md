@@ -761,7 +761,7 @@ That has a direct consequence for how the work is handed out.
   > nothing in it may throw: the read is guarded, and updating a record
   > that has already gone is a no-op.
 
-- [ ] **Task 3.3**: Assign a colour per subagent in `src/colors.ts`.
+- [x] **Task 3.3**: Assign a colour per subagent in `src/colors.ts`.
 
   ```typescript
   export function assignColor(index: number, configured?: string): string;
@@ -771,7 +771,17 @@ That has a direct consequence for how the work is handed out.
   palette by launch index, wrapping when exhausted. Deterministic, so a
   subagent keeps its colour for life.
 
-- [ ] **Task 3.4**: Run detached and notify on completion.
+  > [!NOTE]
+  > Delivered with a six-name `PALETTE` exported alongside, so the list in
+  > Slice 8 and the tests share one source of truth rather than each
+  > carrying a copy. Colour *names* travel on the record, not escape
+  > codes — turning a name into a colour is the renderer's job, under
+  > whatever theme is loaded. An index past the end of the palette falls
+  > back to the first colour rather than handing a renderer an
+  > `undefined`, which `noUncheckedIndexedAccess` forces to be handled
+  > either way.
+
+- [x] **Task 3.4**: Run detached and notify on completion.
 
   `execute()` starts the run without awaiting it and returns the id.
   On completion, deliver the result as a follow-up that triggers a
@@ -789,17 +799,76 @@ That has a direct consequence for how the work is handed out.
   Register a matching `pi.registerMessageRenderer("subagent-complete", …)`
   so it renders as a compact themed box rather than raw text.
 
-- [ ] **Task 3.5**: Register `get_subagent_result`.
+  > [!NOTE]
+  > **Delivered as `src/spawn.ts`**, a file the plan's table did not list.
+  > Detaching a run is neither session-building (`runner.ts`) nor
+  > record-keeping (`registry.ts`), and folding it into `index.ts` would
+  > have mixed tool schemas with lifecycle orchestration.
+  >
+  > **`sendMessage` lives on `pi`, not on `ctx`.** The `ExtensionContext`
+  > handed to a tool's `execute` has no such method
+  > (`dist/core/extensions/types.d.ts`, the `ExtensionContext`
+  > interface), so the notifier is captured at registration and bound —
+  > it is called later from a background continuation with no `pi` in
+  > scope. It returns `void`, not a promise.
+  >
+  > **The tool call's `AbortSignal` must not reach the run.** The call is
+  > over the moment it returns an id, and its signal aborts with it, so
+  > passing it down — as Slice 1 correctly did — would now kill every
+  > subagent at birth. Stopping one deliberately is Slice 6's. Slice 1's
+  > "hands the caller's abort signal to the runner" test is inverted
+  > accordingly.
+  >
+  > **`runSubagent` gained an `onSession` callback.** Task 3.2's
+  > `trackContextUsage` had no possible caller until now: the runner
+  > builds, prompts and disposes the child session without ever exposing
+  > it. `onSession` fires once the session exists and before it is
+  > prompted, so tracking is listening from the first turn. Its body is
+  > guarded on its own account — it runs inside the runner's crash guard,
+  > so an unguarded throw would report a perfectly good run as failed,
+  > letting telemetry break the work it exists to watch.
+  >
+  > **Failure notices are headlined by id alone.** An outcome's `error`
+  > already names its agent, so a headline naming it too reproduces the
+  > `subagent "reviewer" failed: subagent "reviewer" failed: …` doubling
+  > that commit `d78fb0d` removed. A test now pins the name to exactly
+  > one occurrence.
+  >
+  > Handles are still just the agent's type name — Slice 11 makes them
+  > unique. Until then the id is what tells two subagents of a kind
+  > apart, so every notice carries it.
+
+- [x] **Task 3.5**: Register `get_subagent_result`.
 
   Parameters: `id: Type.String()`. Returns the full output for a
   finished subagent; for a running one, returns a message saying so
   and no output.
 
-- [ ] **Task 3.6**: Tests at the tool boundary.
+  > [!NOTE]
+  > An id that was never issued is refused outright, listing the ids
+  > that were — consistent with how an unknown subagent type is handled,
+  > and a typo is a mistake rather than a decision. Both tools share one
+  > `SubagentRegistry` created in the extension factory. The tool
+  > description tells the model its answer will arrive on its own, so
+  > this is not turned into a polling loop.
+
+- [x] **Task 3.6**: Tests at the tool boundary.
 
   Cover: spawn returns an id without waiting; the completion message is
   delivered as a follow-up with `triggerTurn`; result of a finished
   subagent returns its text; result of a running one reports unfinished.
+
+  > [!NOTE]
+  > "Without waiting" is tested over a run that never resolves, so a tool
+  > that waited would hang the test rather than fail it on a timing
+  > coincidence. An earlier version asserted that no notice had been sent
+  > by the time `execute` returned; with an instantly-resolving stub that
+  > races the microtask queue and tests nothing.
+  >
+  > Every Slice 1 boundary test that read an answer out of the tool
+  > result now awaits the notice instead. Two fakes had to grow
+  > `subscribe` and `getContextUsage`, since context tracking attaches to
+  > the child the moment it exists.
 
 ### Slice 4: Concurrency limit with queueing
 
@@ -1156,6 +1225,7 @@ That has a direct consequence for how the work is handed out.
 | `src/agents.ts`             | New — agent file discovery                    |
 | `src/runner.ts`             | New — nested session creation, crash guard    |
 | `src/registry.ts`           | New — records, status, context tracking       |
+| `src/spawn.ts`              | New — detached runs, completion notices       |
 | `src/queue.ts`              | New — concurrency limit                       |
 | `src/control.ts`            | New — steer and stop                          |
 | `src/model-resolver.ts`     | New — fuzzy model matching                    |
