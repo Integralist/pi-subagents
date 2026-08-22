@@ -5,6 +5,7 @@ import type {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agents.ts";
 import { PALETTE } from "../src/colors.ts";
+import { SubagentQueue } from "../src/queue.ts";
 import { SubagentRegistry } from "../src/registry.ts";
 import type { RunSubagentOptions, SubagentOutcome } from "../src/runner.ts";
 import {
@@ -102,6 +103,7 @@ interface StartOptions {
 	config?: AgentConfig;
 	registry?: SubagentRegistry;
 	id?: string;
+	queue?: SubagentQueue;
 }
 
 function start(
@@ -116,6 +118,7 @@ function start(
 		prompt: "review src/agents.ts",
 		description: "review agents file",
 		registry,
+		queue: options.queue ?? new SubagentQueue(5),
 		sendMessage: send.sendMessage as unknown as SendMessage,
 		run: run.run,
 		newId: () => options.id ?? "abc123",
@@ -193,6 +196,57 @@ describe("startSubagent", () => {
 		});
 
 		expect(record.color).toBe("hotpink");
+	});
+});
+
+describe("startSubagent under a concurrency limit", () => {
+	// The plan's acceptance criterion for Slice 4, seen from the caller's side.
+	it("records a subagent past the limit as queued, not running", () => {
+		const queue = new SubagentQueue(1);
+		const registry = new SubagentRegistry();
+		start(run, send, { queue, registry, id: "first" });
+		const second = stubRun();
+
+		const record = start(second, stubSend(), {
+			queue,
+			registry,
+			id: "second",
+		}).record;
+
+		expect(record.status).toBe("queued");
+		expect(second.run).not.toHaveBeenCalled();
+		expect(registry.running().map((r) => r.id)).toEqual(["first"]);
+	});
+
+	it("starts a queued subagent when a slot frees", async () => {
+		const queue = new SubagentQueue(1);
+		const registry = new SubagentRegistry();
+		start(run, send, { queue, registry, id: "first" });
+		const second = stubRun();
+		start(second, stubSend(), { queue, registry, id: "second" });
+
+		run.finish({ status: "completed", output: "done" });
+		await send.delivered;
+		// The notice goes out inside the run; the slot frees a turn later, when
+		// the queue sees that run settle.
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(second.run).toHaveBeenCalledTimes(1);
+		expect(registry.get("second")?.status).toBe("running");
+	});
+
+	/**
+	 * `startedAt` is stamped when the user asks, not when a slot frees, so the
+	 * list stays in the order they asked rather than jumping about as subagents
+	 * are let through.
+	 */
+	it("keeps a queued subagent in the order it was asked for", () => {
+		const queue = new SubagentQueue(1);
+		const registry = new SubagentRegistry();
+		start(run, send, { queue, registry, id: "first" });
+		start(stubRun(), stubSend(), { queue, registry, id: "second" });
+
+		expect(registry.list().map((r) => r.id)).toEqual(["first", "second"]);
 	});
 });
 
@@ -330,6 +384,7 @@ describe("startSubagent completion", () => {
 			prompt: "review src/agents.ts",
 			description: "review agents file",
 			registry,
+			queue: new SubagentQueue(5),
 			sendMessage: failing as unknown as SendMessage,
 			run: run.run,
 			newId: () => "abc123",
@@ -366,6 +421,7 @@ describe("startSubagent when delivery fails", () => {
 				prompt: "review",
 				description: "review",
 				registry: new SubagentRegistry(),
+				queue: new SubagentQueue(5),
 				sendMessage: failing as unknown as SendMessage,
 				run: run.run,
 				newId: () => "abc123",
@@ -402,6 +458,7 @@ describe("startSubagent context tracking", () => {
 			prompt: "review",
 			description: "review",
 			registry,
+			queue: new SubagentQueue(5),
 			sendMessage: send.sendMessage as unknown as SendMessage,
 			run: tracking.run,
 			newId: () => "abc123",
@@ -426,6 +483,7 @@ describe("startSubagent context tracking", () => {
 			prompt: "review",
 			description: "review",
 			registry,
+			queue: new SubagentQueue(5),
 			sendMessage: send.sendMessage as unknown as SendMessage,
 			run: tracking.run,
 			newId: () => "abc123",
@@ -453,6 +511,7 @@ describe("startSubagent context tracking", () => {
 			prompt: "review",
 			description: "review",
 			registry,
+			queue: new SubagentQueue(5),
 			sendMessage: send.sendMessage as unknown as SendMessage,
 			run: runner,
 			newId: () => "abc123",
@@ -481,6 +540,7 @@ describe("startSubagent context tracking", () => {
 			prompt: "review",
 			description: "review",
 			registry,
+			queue: new SubagentQueue(5),
 			sendMessage: send.sendMessage as unknown as SendMessage,
 			run: tracking,
 			newId: () => "abc123",

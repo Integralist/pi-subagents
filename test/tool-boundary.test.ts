@@ -24,6 +24,7 @@ import {
 	createSpawnTool,
 	type SpawnDetails,
 } from "../src/index.ts";
+import { SubagentQueue } from "../src/queue.ts";
 import { SubagentRegistry } from "../src/registry.ts";
 import { runSubagent } from "../src/runner.ts";
 import type { SendMessage } from "../src/spawn.ts";
@@ -78,6 +79,7 @@ function toolOverRealRunner(options: {
 	reply?: unknown[];
 	failWith?: Error;
 	id?: string;
+	limit?: number;
 }) {
 	const factoryCalls: CreateAgentSessionOptions[] = [];
 
@@ -116,11 +118,13 @@ function toolOverRealRunner(options: {
 	});
 
 	const registry = new SubagentRegistry();
+	const queue = new SubagentQueue(options.limit ?? 5);
 	const tool = createSpawnTool({
 		discover: () => options.agents ?? [agentConfig()],
 		run: (opts) => runSubagent({ ...opts, createSession }),
 		getKnownTools: () => ["read", "bash", "edit", "write"],
 		registry,
+		queue,
 		sendMessage: sendMessage as unknown as SendMessage,
 		newId: () => options.id ?? "sub-1",
 	});
@@ -132,6 +136,7 @@ function toolOverRealRunner(options: {
 		factoryCalls,
 		createSession,
 		registry,
+		queue,
 		sendMessage,
 		delivered,
 	};
@@ -235,6 +240,7 @@ describe("Feature: Reading a subagent result back", () => {
 			run: hanging,
 			getKnownTools: () => ["read"],
 			registry,
+			queue: new SubagentQueue(5),
 			sendMessage: vi.fn() as unknown as SendMessage,
 			newId: () => "sub-1",
 		});

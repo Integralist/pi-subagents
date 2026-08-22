@@ -879,12 +879,12 @@ That has a direct consequence for how the work is handed out.
 - **Produces**: `SubagentQueue`.
 - **Execution**: **`/tasks` candidate.** Pure queue logic, no SDK surface.
 
-- [ ] **Task 4.1**: Implement the queue in `src/queue.ts`.
+- [x] **Task 4.1**: Implement the queue in `src/queue.ts`.
 
   ```typescript
   export class SubagentQueue {
-    constructor(private limit: number) {}
-    submit(id: string, run: () => Promise<void>): void;
+    constructor(limit: number) {}
+    submit(run: () => Promise<void>): void;
     get queuedCount(): number;
   }
   ```
@@ -896,11 +896,59 @@ That has a direct consequence for how the work is handed out.
   it is queued and `queuedCount` is 1. When one finishes, then the
   queued one starts.
 
-- [ ] **Task 4.2**: Make the limit configurable, defaulting to 5.
+  > [!NOTE]
+  > **`submit` takes no `id`.** Nothing in this slice reads one: the
+  > queue hands out slots to thunks and never needs to name them, and
+  > the caller already holds the record. An unused parameter cannot be
+  > tested, which is the tell. Slice 6 should add it back at the moment
+  > cancelling a *queued* subagent gives it something to identify.
+  >
+  > Two guarantees the sketch does not mention, both mutation-tested. A
+  > limit below one is clamped to one — accepting subagents and starting
+  > none of them reads as a hang rather than as a setting. And the
+  > `finally` that frees a slot is paired with a `catch`: `finally`
+  > alone lets the rejection escape a promise nobody awaits, which is an
+  > unhandled rejection and by default takes the host process down.
+  >
+  > Wiring it up put the status transition in `startSubagent`, not in
+  > the queue: a record is born `queued` and its own submitted thunk
+  > flips it to `running`. With a slot free the queue calls that thunk
+  > synchronously, so nobody ever sees the intermediate state. That is
+  > what keeps `queue.ts` free of any subagent vocabulary at all.
+  > `startedAt` is still stamped at submission rather than at start, so
+  > `list()` stays in the order the user asked rather than reordering
+  > itself as slots free.
+
+- [x] **Task 4.2**: Make the limit configurable, defaulting to 5.
 
   Read from Pi settings, falling back to 5 — matching the point at
   which the list gains a second column, so the default fills exactly
   one column.
+
+  > [!NOTE]
+  > **Pi's `Settings` is a closed interface with nowhere to declare an
+  > extension's own key**, and neither `ExtensionContext` nor
+  > `ExtensionAPI` exposes a settings reader —
+  > `registerFlag`/`getFlag` are the only configuration surface offered
+  > to extensions. What makes this work anyway: settings are loaded with
+  > a plain `JSON.parse` and migrated, with no schema stripping
+  > (`dist/core/settings-manager.js`, `loadFromStorage`), so an unknown
+  > `subagents.limit` key survives and can be read back off
+  > `getProjectSettings()` / `getGlobalSettings()`.
+  >
+  > Project settings win over global, matching
+  > `deepMergeSettings(globalSettings, projectSettings)` everywhere else
+  > in pi. A limit that is not a whole number above zero is treated as
+  > absent and the next source is tried, so a typo in a project file
+  > does not silently veto a perfectly good global one.
+  >
+  > **No guard around the read.** `SettingsManager.create` routes both
+  > loads through `tryLoadFromStorage` and so reports an unreadable or
+  > unlockable settings file as empty settings rather than throwing —
+  > verified against the installed SDK with an agent directory that is a
+  > file, that does not exist, that is `/dev/null`, and that is
+  > read-only. A `catch` here would be unreachable, so there is not one;
+  > a test pins pi's behaviour, since the code now depends on it.
 
 ### Slice 5: Turn limits with a graceful wrap-up
 

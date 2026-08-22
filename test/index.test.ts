@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
@@ -8,10 +11,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agents.ts";
 import extension, {
 	buildToolDescription,
+	configuredLimit,
 	createSpawnTool,
 	RESULT_TOOL_NAME,
 	SPAWN_TOOL_NAME,
 } from "../src/index.ts";
+import { DEFAULT_CONCURRENCY, SubagentQueue } from "../src/queue.ts";
 import { SubagentRegistry } from "../src/registry.ts";
 import { runInChildContext, type SubagentOutcome } from "../src/runner.ts";
 import type { SendMessage } from "../src/spawn.ts";
@@ -116,6 +121,7 @@ interface Harness {
 	run: ReturnType<typeof vi.fn>;
 	discover: ReturnType<typeof vi.fn>;
 	registry: SubagentRegistry;
+	queue: SubagentQueue;
 	sendMessage: ReturnType<typeof vi.fn>;
 	/** Resolves once the completion notice has been delivered. */
 	delivered: Promise<void>;
@@ -134,6 +140,8 @@ function harness(
 		outcome?: SubagentOutcome;
 		/** A run that never finishes, so waiting on it would hang the test. */
 		hang?: boolean;
+		/** How many subagents may run at once. Generous unless a test says so. */
+		limit?: number;
 	} = {},
 ): Harness {
 	const discover = vi.fn(() => options.agents ?? [agentConfig()]);
@@ -153,16 +161,22 @@ function harness(
 	});
 
 	const registry = new SubagentRegistry();
+	const queue = new SubagentQueue(options.limit ?? 5);
+	let issued = 0;
 	const tool = createSpawnTool({
 		discover,
 		run,
 		getKnownTools: () =>
 			options.knownTools ?? ["read", "bash", "edit", "write"],
 		registry,
+		queue,
 		sendMessage: sendMessage as unknown as SendMessage,
-		newId: () => "sub-1",
+		newId: () => {
+			issued += 1;
+			return `sub-${issued}`;
+		},
 	});
-	return { tool, run, discover, registry, sendMessage, delivered };
+	return { tool, run, discover, registry, queue, sendMessage, delivered };
 }
 
 /** The text of the completion notice the harness captured. */
@@ -433,6 +447,57 @@ describe("spawn_subagent", () => {
 
 		expect(noticeText(sendMessage)).toContain("got halfway");
 		expect(noticeText(sendMessage)).toMatch(/stopped/i);
+	});
+});
+
+describe("spawn_subagent under a concurrency limit", () => {
+	it("queues a spawn when every slot is taken, and says so", async () => {
+		const { tool, run, registry } = harness({ limit: 1, hang: true });
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+
+		const result = await tool.execute(
+			"call-2",
+			VALID_ARGS,
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(resultText(result)).toMatch(/queued/i);
+		expect(registry.get("sub-2")?.status).toBe("queued");
+		// The first is still the only one actually running.
+		expect(run).toHaveBeenCalledTimes(1);
+	});
+
+	it("reports the id of a queued subagent, same as a started one", async () => {
+		const { tool } = harness({ limit: 1, hang: true });
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+
+		const result = await tool.execute(
+			"call-2",
+			VALID_ARGS,
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(resultText(result)).toContain("sub-2");
+		expect((result.details as { id: string }).id).toBe("sub-2");
+	});
+
+	it("does not call a subagent queued when it started at once", async () => {
+		const { tool } = harness({ hang: true });
+
+		const result = await tool.execute(
+			"call-1",
+			VALID_ARGS,
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(resultText(result)).not.toMatch(/queued/i);
+		expect(resultText(result)).toMatch(/started/i);
 	});
 });
 
@@ -852,5 +917,66 @@ describe("spawn_subagent tool allowlist validation", () => {
 		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
 
 		expect(run.mock.calls[0]?.[0].config.tools).toBeUndefined();
+	});
+});
+
+describe("configuredLimit", () => {
+	/** A throwaway project and agent directory pair. */
+	function dirs() {
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-"));
+		const cwd = join(root, "project");
+		const agentDir = join(root, "agent");
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		mkdirSync(agentDir, { recursive: true });
+		return { root, cwd, agentDir };
+	}
+
+	function writeSettings(dir: string, settings: unknown) {
+		writeFileSync(join(dir, "settings.json"), JSON.stringify(settings));
+	}
+
+	it("runs five at a time when nothing is configured", () => {
+		const { cwd, agentDir } = dirs();
+
+		expect(configuredLimit(cwd, agentDir)).toBe(DEFAULT_CONCURRENCY);
+	});
+
+	// The whole point of Task 4.2: the number comes out of pi's settings.json.
+	it("reads the limit out of the global settings file", () => {
+		const { cwd, agentDir } = dirs();
+		writeSettings(agentDir, { theme: "dark", subagents: { limit: 2 } });
+
+		expect(configuredLimit(cwd, agentDir)).toBe(2);
+	});
+
+	it("lets a project's settings file win", () => {
+		const { cwd, agentDir } = dirs();
+		writeSettings(agentDir, { subagents: { limit: 2 } });
+		writeSettings(join(cwd, ".pi"), { subagents: { limit: 7 } });
+
+		expect(configuredLimit(cwd, agentDir)).toBe(7);
+	});
+
+	// Pi's own loader swallows a parse error and reports empty settings, so
+	// this is about the limit rather than about not throwing.
+	it("falls back to the default on an unreadable settings file", () => {
+		const { cwd, agentDir } = dirs();
+		writeFileSync(join(agentDir, "settings.json"), "{ not json at all");
+
+		expect(configuredLimit(cwd, agentDir)).toBe(DEFAULT_CONCURRENCY);
+	});
+
+	/**
+	 * Pins an assumption rather than our own code: pi reports a settings file it
+	 * cannot read as empty settings instead of throwing, which is why nothing
+	 * here guards against it. If that ever changes, loading the extension starts
+	 * throwing and this test says so first.
+	 */
+	it("survives an agent directory that is not a directory", () => {
+		const { root, cwd } = dirs();
+		const notADirectory = join(root, "a-file");
+		writeFileSync(notADirectory, "");
+
+		expect(configuredLimit(cwd, notADirectory)).toBe(DEFAULT_CONCURRENCY);
 	});
 });

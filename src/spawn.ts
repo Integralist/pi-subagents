@@ -22,6 +22,7 @@ import type {
 import { type Component, Text } from "@earendil-works/pi-tui";
 import type { AgentConfig } from "./agents.ts";
 import { assignColor } from "./colors.ts";
+import type { SubagentQueue } from "./queue.ts";
 import {
 	type SubagentRecord,
 	type SubagentRegistry,
@@ -70,6 +71,8 @@ export interface StartSubagentOptions {
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	registry: SubagentRegistry;
+	/** Hands out the slots. Past the limit a subagent waits its turn. */
+	queue: SubagentQueue;
 	sendMessage: SendMessage;
 	run?: RunSubagentFn;
 	/** Seams for a deterministic test. */
@@ -184,14 +187,22 @@ async function runAndAnnounce(
 /**
  * Launch a subagent and return its record at once.
  *
- * The record is registered before the run starts, so a caller that reads the
- * registry on the very next line already sees the subagent there.
+ * The record is registered before the run is submitted, so a caller that reads
+ * the registry on the very next line already sees the subagent there — running
+ * if a slot was free, queued if every slot was taken.
+ *
+ * The record starts out `queued` and the submitted thunk flips it to `running`
+ * as its first act. With a slot free the queue calls that thunk synchronously,
+ * so the common case never shows a `queued` record to anyone. This is also why
+ * the queue itself needs to know nothing about subagents: it hands out slots,
+ * and what a slot means is entirely the thunk's business.
  */
 export function startSubagent(opts: StartSubagentOptions): SubagentRecord {
 	const {
 		config,
 		description,
 		registry,
+		queue,
 		run = runSubagent,
 		newId = randomUUID,
 		now = Date.now,
@@ -204,16 +215,21 @@ export function startSubagent(opts: StartSubagentOptions): SubagentRecord {
 		handle: config.name,
 		type: config.name,
 		description,
-		status: "running",
+		status: "queued",
 		// Counted before the record is added, so the first subagent is index 0.
 		color: assignColor(registry.list().length, config.color),
+		// Stamped at submission, not at start, so `list()` stays in the order the
+		// user asked for subagents rather than the order slots happened to free.
 		startedAt: now(),
 		contextPercent: null,
 		turns: 0,
 	};
 
 	registry.add(record);
-	void runAndAnnounce(record, opts, run);
+	queue.submit(() => {
+		registry.update(record.id, { status: "running" });
+		return runAndAnnounce(record, opts, run);
+	});
 
 	return record;
 }

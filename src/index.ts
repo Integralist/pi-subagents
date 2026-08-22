@@ -15,10 +15,13 @@ import {
 	defineTool,
 	type ExtensionAPI,
 	type ExtensionContext,
+	getAgentDir,
+	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { type AgentConfig, discoverAgents } from "./agents.ts";
 import { modelLabel, resolveModel } from "./model-resolver.ts";
+import { resolveConcurrencyLimit, SubagentQueue } from "./queue.ts";
 import { type SubagentRecord, SubagentRegistry } from "./registry.ts";
 import { inChildContext, runSubagent } from "./runner.ts";
 import {
@@ -68,6 +71,8 @@ export interface SpawnToolDeps {
 	getKnownTools: () => string[];
 	/** Where launched subagents are recorded, shared with the result tool. */
 	registry: SubagentRegistry;
+	/** Hands out the slots, so a busy session queues rather than piles up. */
+	queue: SubagentQueue;
 	sendMessage: SendMessage;
 	/** Seam for a deterministic test. */
 	newId?: () => string;
@@ -233,11 +238,18 @@ function describeStart(
 		);
 	}
 
+	// Queued rather than started is worth saying: it explains a subagent that
+	// has not begun, and it tells the model that launching more will not make
+	// this one go any faster.
 	parts.push(
-		`Subagent "${record.type}" started with id ${record.id}. It runs in the ` +
-			"background and its result will arrive here on its own. Carry on with " +
-			`other work; call ${RESULT_TOOL_NAME} with that id to read the result ` +
-			"before then.",
+		record.status === "queued"
+			? `Subagent "${record.type}" is queued with id ${record.id}, waiting ` +
+					"for one of the running subagents to finish. It will start on its " +
+					"own, and its result will arrive here when it is done."
+			: `Subagent "${record.type}" started with id ${record.id}. It runs in ` +
+					"the background and its result will arrive here on its own. Carry " +
+					`on with other work; call ${RESULT_TOOL_NAME} with that id to read ` +
+					"the result before then.",
 	);
 
 	return parts.join("\n\n");
@@ -332,6 +344,7 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 				// naming neither inherits the parent's.
 				thinkingLevel: (params.thinking as ThinkingLevel) ?? config.thinking,
 				registry: deps.registry,
+				queue: deps.queue,
 				sendMessage: deps.sendMessage,
 				run: deps.run,
 				...(deps.newId ? { newId: deps.newId } : {}),
@@ -409,10 +422,35 @@ export function createResultTool(deps: { registry: SubagentRegistry }) {
 	});
 }
 
+/**
+ * How many subagents this session runs at once.
+ *
+ * Read once, at registration. A limit that changed under a running queue would
+ * leave subagents already through the gate uncounted against it, and settings
+ * are not something a user edits mid-turn.
+ *
+ * Unguarded on purpose. `SettingsManager.create` reports a settings file it
+ * cannot read or lock as empty settings rather than throwing — both loads go
+ * through `tryLoadFromStorage` — so a hostile agent directory already arrives
+ * here as "nothing configured", and a `catch` of our own would only be
+ * unreachable.
+ */
+export function configuredLimit(
+	cwd: string,
+	agentDir: string = getAgentDir(),
+): number {
+	const settings = SettingsManager.create(cwd, agentDir);
+	return resolveConcurrencyLimit(
+		settings.getProjectSettings(),
+		settings.getGlobalSettings(),
+	);
+}
+
 export default function (pi: ExtensionAPI): void {
 	// One registry for the session, shared by the tool that fills it and the
-	// tool that reads it.
+	// tool that reads it, and one queue holding them all to the limit.
 	const registry = new SubagentRegistry();
+	const queue = new SubagentQueue(configuredLimit(process.cwd()));
 
 	pi.registerTool(
 		createSpawnTool({
@@ -422,6 +460,7 @@ export default function (pi: ExtensionAPI): void {
 			// is only settled once the session is running.
 			getKnownTools: () => pi.getAllTools().map((tool) => tool.name),
 			registry,
+			queue,
 			// Bound, because it is called later from a background continuation
 			// that has no `pi` of its own.
 			sendMessage: pi.sendMessage.bind(pi),
