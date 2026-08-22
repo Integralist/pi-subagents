@@ -84,6 +84,22 @@ export interface SubagentListOptions {
 	 * list attached.
 	 */
 	addInputListener?: (listener: TuiInputListener) => () => void;
+	/**
+	 * Open the selected subagent's conversation.
+	 *
+	 * The returned promise is how the list knows the view has closed: while one
+	 * is open every key belongs to it, and the list must take none of them.
+	 * Without that, escape would leave the list rather than close the view — the
+	 * list's input listener runs before the focused component sees a key.
+	 */
+	onOpen?: (record: SubagentRecord) => Promise<void> | void;
+	/**
+	 * Halt the selected subagent.
+	 *
+	 * Reported nowhere here: a stop that worked shows up as the row's own status
+	 * changing, and one that was refused is the caller's to put on screen.
+	 */
+	onStop?: (record: SubagentRecord) => void;
 	/** Seams for a deterministic test. */
 	now?: () => number;
 	delay?: (fn: () => void, ms: number) => void;
@@ -209,6 +225,12 @@ export class SubagentList implements Component {
 	readonly #delay: (fn: () => void, ms: number) => void;
 	readonly #requestRender: () => void;
 	readonly #getEditorText: (() => string) | undefined;
+	readonly #onOpen:
+		| ((record: SubagentRecord) => Promise<void> | void)
+		| undefined;
+	readonly #onStop: ((record: SubagentRecord) => void) | undefined;
+	/** True while an opened subagent's view is on screen and holding the keys. */
+	#viewing = false;
 	readonly #teardown: Array<() => void> = [];
 	/** Records with a redraw already scheduled, so each is only queued once. */
 	readonly #expiring = new Set<string>();
@@ -235,6 +257,8 @@ export class SubagentList implements Component {
 		this.#delay = options.delay ?? laterUnref;
 		this.#requestRender = options.requestRender ?? (() => {});
 		this.#getEditorText = options.getEditorText;
+		this.#onOpen = options.onOpen;
+		this.#onStop = options.onStop;
 
 		if (options.requestRender) {
 			this.#teardown.push(this.#registry.onChange(() => this.#handleChange()));
@@ -422,6 +446,14 @@ export class SubagentList implements Component {
 	 * text.
 	 */
 	handleKey(data: string): boolean {
+		// An opened subagent's view holds the keyboard while it is on screen. This
+		// list's input listener is consulted before the focused view, so a key
+		// taken here would act on the list instead — escape would leave the list
+		// and the view would never close.
+		if (this.#viewing) {
+			return false;
+		}
+
 		// Escape is not an arrow, and a user with a half-typed prompt and a
 		// selected row still means to leave the list. Only taken when there is a
 		// selection to leave: escape means a great many things at a prompt, and
@@ -444,6 +476,23 @@ export class SubagentList implements Component {
 		const records = this.visible();
 		if (records.length === 0) {
 			return false;
+		}
+
+		// Both keys below act on the selected subagent, and neither is taken
+		// without one: enter still submits the prompt, and delete still belongs to
+		// the editor, whenever no row is selected.
+		const selected = records.find((record) => record.id === this.selectedId);
+
+		if (matchesKey(data, Key.enter)) {
+			return selected ? this.#open(selected) : false;
+		}
+
+		if (matchesKey(data, Key.delete)) {
+			if (!selected || !this.#onStop) {
+				return false;
+			}
+			this.#onStop(selected);
+			return true;
 		}
 
 		const { columns } = this.#columnsFor(records, this.#lastWidth);
@@ -494,9 +543,36 @@ export class SubagentList implements Component {
 			return this.#select(target[Math.min(at.row, target.length - 1)]);
 		}
 
-		// Enter opens the selected subagent in Slice 10. Until then it reaches the
-		// editor untouched rather than being quietly swallowed.
 		return false;
+	}
+
+	/**
+	 * Show the selected subagent's conversation, standing down until it closes.
+	 *
+	 * The promise the caller returns is the only signal that the view has gone. A
+	 * rejection releases the keyboard just as a close does: a view that failed to
+	 * open is not on screen, and a list that stayed silent afterwards would be a
+	 * list with no navigation and no way to get it back.
+	 */
+	#open(record: SubagentRecord): boolean {
+		if (!this.#onOpen) {
+			return false;
+		}
+
+		this.#viewing = true;
+		try {
+			void Promise.resolve(this.#onOpen(record))
+				.catch(() => {})
+				.finally(() => this.#release());
+		} catch {
+			this.#release();
+		}
+		return true;
+	}
+
+	#release(): void {
+		this.#viewing = false;
+		this.#requestRender();
 	}
 
 	/** Take a row as the selection, reporting the key as consumed either way. */

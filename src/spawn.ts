@@ -22,6 +22,11 @@ import type {
 import { type Component, Text } from "@earendil-works/pi-tui";
 import type { AgentConfig } from "./agents.ts";
 import { assignColor } from "./colors.ts";
+import {
+	type ControlDeps,
+	type ControlResult,
+	stopSubagent,
+} from "./control.ts";
 import type { SubagentQueue } from "./queue.ts";
 import {
 	type SubagentRecord,
@@ -168,6 +173,71 @@ function turnLimit(config: AgentConfig): TurnLimit {
 }
 
 /**
+ * Put a subagent's outcome into the conversation.
+ *
+ * Delivered as a follow-up rather than as a tool result, so the main model reads
+ * it as news that arrived while it was working on something else — which is what
+ * it is. `triggerTurn` is what makes it act on the news rather than sit on it
+ * until the user next says something.
+ */
+function announce(
+	record: SubagentRecord,
+	outcome: SubagentOutcome,
+	sendMessage: SendMessage,
+): void {
+	sendMessage(
+		{
+			customType: COMPLETE_MESSAGE_TYPE,
+			content: describeCompletion(record, outcome),
+			display: true,
+			details: {
+				id: record.id,
+				handle: record.handle,
+				agent: record.type,
+				status: record.status,
+				description: record.description,
+				contextPercent: record.contextPercent,
+			} satisfies SubagentCompleteDetails,
+		},
+		{ deliverAs: "followUp", triggerTurn: true },
+	);
+}
+
+/**
+ * Halt a subagent on the user's behalf, and say so if nobody else will.
+ *
+ * Stopping through the tool needs no notice: the model is holding the tool call
+ * and reads the outcome in its result. Stopping from the list or the open view
+ * has no such result, and the model was told at spawn that "its result will
+ * arrive here when it is done" — so without a notice it waits for an answer that
+ * is never coming.
+ *
+ * Only a subagent that never started is announced here. A running one settles
+ * into a stopped outcome of its own, and `runAndAnnounce` reports that; saying
+ * it twice would have the model reading the same stop as two.
+ */
+export async function stopFromUi(
+	record: SubagentRecord,
+	deps: ControlDeps,
+	sendMessage: SendMessage,
+): Promise<ControlResult> {
+	const neverStarted = record.status === "queued";
+	const result = await stopSubagent(record, deps);
+	if (!result.ok || !neverStarted) {
+		return result;
+	}
+
+	// Read off the record rather than assumed: `stopSubagent` puts an empty
+	// stopped outcome on a queued subagent, and that is what the notice is about.
+	announce(
+		record,
+		record.outcome ?? { status: "stopped", output: "" },
+		sendMessage,
+	);
+	return result;
+}
+
+/**
  * Run the subagent and tell the conversation how it went.
  *
  * Runs detached, with nobody awaiting it, so every failure is contained here:
@@ -219,22 +289,7 @@ async function runAndAnnounce(
 
 		registry.update(record.id, { status: outcome.status, outcome });
 
-		sendMessage(
-			{
-				customType: COMPLETE_MESSAGE_TYPE,
-				content: describeCompletion(record, outcome),
-				display: true,
-				details: {
-					id: record.id,
-					handle: record.handle,
-					agent: record.type,
-					status: record.status,
-					description: record.description,
-					contextPercent: record.contextPercent,
-				} satisfies SubagentCompleteDetails,
-			},
-			{ deliverAs: "followUp", triggerTurn: true },
-		);
+		announce(record, outcome, sendMessage);
 	} catch {
 		// Nothing left to tell, and nobody to tell it to. The record already
 		// carries whatever was known before this went wrong.

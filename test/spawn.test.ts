@@ -19,6 +19,7 @@ import {
 	type SendMessage,
 	type SubagentCompleteDetails,
 	startSubagent,
+	stopFromUi,
 } from "../src/spawn.ts";
 import { DEFAULT_MAX_TURNS, WRAP_UP_MESSAGE } from "../src/turns.ts";
 
@@ -974,5 +975,151 @@ describe("resumeSubagent", () => {
 			expect(result.ok ? "" : result.reason, status).toMatch(/still/i);
 			expect(run.run, status).not.toHaveBeenCalled();
 		}
+	});
+});
+
+/**
+ * Stopping a subagent from the list or the open view.
+ *
+ * The tool path needs no notice — the model is holding the tool call and reads
+ * the outcome in its result. The UI has no such result, and the model was
+ * promised an answer at spawn, so the gap this closes is a main model waiting
+ * for something that is never coming.
+ */
+describe("stopFromUi", () => {
+	/** A subagent past the limit, with a run holding the only slot. */
+	function queued() {
+		const queue = new SubagentQueue(1);
+		const running = start(run, send, { queue, id: "running" });
+		const waiting = start(stubRun(), send, {
+			queue,
+			id: "waiting",
+			registry: running.registry,
+		});
+		return { queue, registry: running.registry, record: waiting.record };
+	}
+
+	/** A subagent already under way, with a session to abort. */
+	function underWay() {
+		const registry = new SubagentRegistry();
+		const abort = vi.fn(async () => {});
+		const record: SubagentRecord = {
+			id: "abc123",
+			handle: "reviewer",
+			type: "reviewer",
+			description: "review agents file",
+			status: "running",
+			color: "cyan",
+			startedAt: 1_000,
+			contextPercent: null,
+			turns: 0,
+			session: {
+				abort,
+				steer: vi.fn(async () => {}),
+			} as unknown as SubagentRecord["session"],
+		};
+		registry.add(record);
+		return { registry, record, abort, queue: new SubagentQueue(5) };
+	}
+
+	it("stops a subagent that never started", async () => {
+		const { queue, registry, record } = queued();
+		expect(record.status).toBe("queued");
+
+		const result = await stopFromUi(
+			record,
+			{ registry, queue },
+			send.sendMessage as unknown as SendMessage,
+		);
+
+		expect(result.ok).toBe(true);
+		expect(registry.get("waiting")?.status).toBe("stopped");
+	});
+
+	/**
+	 * A queued subagent's run never starts, so nothing else will ever settle it
+	 * — this notice is the only thing that tells the main model to stop waiting.
+	 */
+	it("tells the conversation a queued subagent will not answer", async () => {
+		const { queue, registry, record } = queued();
+
+		await stopFromUi(
+			record,
+			{ registry, queue },
+			send.sendMessage as unknown as SendMessage,
+		);
+
+		const { message, options } = delivered(send);
+		expect(message.customType).toBe(COMPLETE_MESSAGE_TYPE);
+		expect(message.content).toMatch(/stopped/i);
+		expect(message.content).toMatch(/incomplete/i);
+		expect(message.details.id).toBe("waiting");
+		// News that arrived, not an answer that was asked for.
+		expect(options.deliverAs).toBe("followUp");
+		expect(options.triggerTurn).toBe(true);
+	});
+
+	/**
+	 * A queued subagent that has just been handed a slot cannot be dropped from
+	 * the queue any more, so the stop is refused — and a notice sent anyway would
+	 * tell the main model to stop waiting for a subagent still working.
+	 */
+	it("says nothing when a queued subagent could not be dropped", async () => {
+		const registry = new SubagentRegistry();
+		const record: SubagentRecord = {
+			id: "abc123",
+			handle: "reviewer",
+			type: "reviewer",
+			description: "review agents file",
+			status: "queued",
+			color: "cyan",
+			startedAt: 1_000,
+			contextPercent: null,
+			turns: 0,
+		};
+		registry.add(record);
+
+		// Never submitted, so the queue has nothing of that id to cancel — which
+		// is what a subagent that has just taken its slot looks like.
+		const result = await stopFromUi(
+			record,
+			{ registry, queue: new SubagentQueue(5) },
+			send.sendMessage as unknown as SendMessage,
+		);
+
+		expect(result.ok).toBe(false);
+		expect(send.sendMessage).not.toHaveBeenCalled();
+	});
+
+	/**
+	 * A running subagent's own run settles into a stopped outcome and announces
+	 * it. Saying so here as well would have the model reading one stop as two.
+	 */
+	it("leaves a running subagent's notice to its own run", async () => {
+		const { registry, record, abort, queue } = underWay();
+
+		const result = await stopFromUi(
+			record,
+			{ registry, queue },
+			send.sendMessage as unknown as SendMessage,
+		);
+
+		expect(result.ok).toBe(true);
+		expect(abort).toHaveBeenCalledTimes(1);
+		expect(send.sendMessage).not.toHaveBeenCalled();
+	});
+
+	it("says nothing when the stop was refused", async () => {
+		const { registry, record, queue } = underWay();
+		registry.update(record.id, { status: "completed" });
+
+		const result = await stopFromUi(
+			record,
+			{ registry, queue },
+			send.sendMessage as unknown as SendMessage,
+		);
+
+		expect(result.ok).toBe(false);
+		expect(send.sendMessage).not.toHaveBeenCalled();
 	});
 });

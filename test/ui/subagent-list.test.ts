@@ -1,6 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PALETTE } from "../../src/colors.ts";
 import { type SubagentRecord, SubagentRegistry } from "../../src/registry.ts";
 import { ROWS_PER_COLUMN } from "../../src/ui/layout.ts";
@@ -80,6 +80,8 @@ function list(
 		lingerMs?: number;
 		theme?: Theme;
 		editorText?: () => string;
+		onOpen?: (record: SubagentRecord) => Promise<void> | void;
+		onStop?: (record: SubagentRecord) => void;
 	} = {},
 ) {
 	return new SubagentList({
@@ -89,6 +91,8 @@ function list(
 		lingerMs: options.lingerMs,
 		now: () => clock,
 		getEditorText: options.editorText,
+		onOpen: options.onOpen,
+		onStop: options.onStop,
 	});
 }
 
@@ -641,12 +645,16 @@ describe("SubagentList navigation", () => {
 	const LEFT = "\x1b[D";
 	const ESC = "\x1b";
 	const ENTER = "\r";
+	const DELETE = "\x1b[3~";
 
 	/** A list over `count` running subagents, at an empty prompt by default. */
 	function nav(count: number, text = "") {
 		addRunning(count);
 		return list({ editorText: () => text });
 	}
+
+	/** Let the promise a key press started settle, however it was chained. */
+	const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 	/** Feed each key in turn and report what the list did with the last one. */
 	function press(subject: SubagentList, ...keys: string[]): boolean {
@@ -925,7 +933,6 @@ describe("SubagentList navigation", () => {
 
 	describe("keys it has no business taking", () => {
 		it.each([
-			["enter", "\r"],
 			["a printable character", "h"],
 			["a control character", "\x03"],
 			["tab", "\t"],
@@ -936,15 +943,140 @@ describe("SubagentList navigation", () => {
 			expect(subject.handleKey(key)).toBe(false);
 		});
 
-		// Enter opens the selected subagent in Slice 10. Until then it must reach
-		// the editor untouched rather than being quietly swallowed.
-		it("does not yet act on enter", () => {
+		/**
+		 * A list with nothing to open must not swallow enter: the prompt's own
+		 * enter is how a session is driven, and a list is not worth breaking it
+		 * for.
+		 */
+		it.each([
+			["enter", "\r"],
+			["delete", "\x1b[3~"],
+		])("leaves %s alone with nothing wired to it", (_name, key) => {
 			const subject = nav(3);
 			press(subject, DOWN);
 
-			press(subject, ENTER);
+			expect(subject.handleKey(key)).toBe(false);
+		});
+	});
 
+	describe("opening a subagent", () => {
+		/** Held open until the test closes it, the way a real view is. */
+		function opening() {
+			let close = () => {};
+			const closed = new Promise<void>((resolve) => {
+				close = resolve;
+			});
+			const onOpen = vi.fn((_record: SubagentRecord) => closed);
+			return { onOpen, close };
+		}
+
+		// The specification's scenario, quoted.
+		it("Opens a subagent", () => {
+			const { onOpen } = opening();
+			addRunning(3);
+			const subject = list({ editorText: () => "", onOpen });
+			press(subject, DOWN, DOWN);
+
+			expect(press(subject, ENTER)).toBe(true);
+
+			// That subagent's conversation is shown.
+			expect(onOpen).toHaveBeenCalledTimes(1);
+			expect(onOpen.mock.calls[0]?.[0]).toMatchObject({ id: "sub-1" });
+		});
+
+		it("opens nothing when no row is selected", () => {
+			const { onOpen } = opening();
+			addRunning(3);
+			const subject = list({ editorText: () => "", onOpen });
+
+			expect(press(subject, ENTER)).toBe(false);
+			expect(onOpen).not.toHaveBeenCalled();
+		});
+
+		/** With text in the prompt, enter submits it. */
+		it("opens nothing when the prompt has text", () => {
+			const { onOpen } = opening();
+			addRunning(3);
+			const subject = list({ editorText: () => "", onOpen });
+			press(subject, DOWN);
+
+			const typing = list({ editorText: () => "hello", onOpen });
+			expect(press(typing, ENTER)).toBe(false);
 			expect(subject.selectedId).toBe("sub-0");
+			expect(onOpen).not.toHaveBeenCalled();
+		});
+
+		/**
+		 * The view holds the keyboard while it is on screen, and this list is
+		 * asked about every key first. Taking escape here would leave the list
+		 * instead of closing the view, which would leave no way to close it.
+		 */
+		it("takes no keys while the view is open", () => {
+			const { onOpen } = opening();
+			addRunning(3);
+			const subject = list({ editorText: () => "", onOpen });
+			press(subject, DOWN, ENTER);
+
+			expect(press(subject, DOWN)).toBe(false);
+			expect(press(subject, ESC)).toBe(false);
+			expect(subject.selectedId).toBe("sub-0");
+		});
+
+		it("takes keys again once the view closes", async () => {
+			const { onOpen, close } = opening();
+			addRunning(3);
+			const subject = list({ editorText: () => "", onOpen });
+			press(subject, DOWN, ENTER);
+
+			close();
+			await settle();
+
+			expect(press(subject, DOWN)).toBe(true);
+			expect(subject.selectedId).toBe("sub-1");
+		});
+
+		/** A view that failed to open is not on screen, so nor is it holding keys. */
+		it("takes keys again when the view fails to open", async () => {
+			addRunning(3);
+			const subject = list({
+				editorText: () => "",
+				onOpen: () => Promise.reject(new Error("no terminal")),
+			});
+			press(subject, DOWN, ENTER);
+
+			await settle();
+
+			expect(press(subject, DOWN)).toBe(true);
+		});
+	});
+
+	describe("stopping a subagent", () => {
+		it("stops the selected subagent on delete", () => {
+			const onStop = vi.fn();
+			addRunning(3);
+			const subject = list({ editorText: () => "", onStop });
+			press(subject, DOWN, DOWN);
+
+			expect(press(subject, DELETE)).toBe(true);
+			expect(onStop.mock.calls[0]?.[0]).toMatchObject({ id: "sub-1" });
+		});
+
+		it("stops nothing when no row is selected", () => {
+			const onStop = vi.fn();
+			addRunning(3);
+			const subject = list({ editorText: () => "", onStop });
+
+			expect(press(subject, DELETE)).toBe(false);
+			expect(onStop).not.toHaveBeenCalled();
+		});
+
+		it("stops nothing when the prompt has text", () => {
+			const onStop = vi.fn();
+			addRunning(3);
+			const subject = list({ editorText: () => "hello", onStop });
+
+			expect(press(subject, DELETE)).toBe(false);
+			expect(onStop).not.toHaveBeenCalled();
 		});
 	});
 

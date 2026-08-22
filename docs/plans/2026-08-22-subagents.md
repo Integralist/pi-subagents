@@ -1594,22 +1594,98 @@ That has a direct consequence for how the work is handed out.
 - **Execution**: **Main thread.** Visual and interactive; same reason as Slice
   9\.
 
-- [ ] **Task 10.1**: Build the viewer.
+- [x] **Task 10.1**: Build the viewer.
 
   Subscribe to that subagent's `session.subscribe()` and render its
   conversation, auto-following new content. Escape returns to the list.
 
-- [ ] **Task 10.2**: Steer from the viewer.
+  > [!NOTE]
+  > **The conversation is drawn with pi's own message components**, not
+  > formatted here: `UserMessageComponent`,
+  > `AssistantMessageComponent` and `ToolExecutionComponent` are all
+  > exported from the package root. An open subagent therefore reads
+  > exactly like the session around it — same markdown, same per-tool
+  > renderers, same collapsing — and the child session's
+  > `getToolDefinition(name)` is passed through so each call renders the
+  > way it did in the session that ran it. They live behind
+  > `Transcript` in `src/ui/transcript.ts`, which is the seam the tests
+  > drive.
+  >
+  > **They read pi's *global* theme, not the one handed to the widget
+  > factory**, and throw `Theme not initialized` until `initTheme()` has
+  > run (`theme.js:640`). In a session that has always happened; in a
+  > test it has to be done in `beforeAll`. That is also why no
+  > `markdownTheme` is injected — pi's components would read the global
+  > for their other colours regardless, so injecting one would only
+  > half-work.
+  >
+  > **The view is `ctx.ui.custom(…, { overlay: true })`**, which hands
+  > it the keyboard and resolves when it calls the `done` it was given.
+  > That promise is what the list waits on.
+  >
+  > **The list has to stand down while the view is open.** A widget's
+  > `tui.addInputListener` is consulted *before* the focused component
+  > (`tui.js:560`), so the list would otherwise take the view's escape
+  > and leave the list instead of closing the view — with no other way
+  > out. `onOpen` returning a promise is what tells the list when to
+  > start taking keys again, including when opening fails.
+  >
+  > **An overlay clips from the top** (`tui.js:819`), so nothing in
+  > pi's overlay path follows a growing conversation. The view renders
+  > its own tail against a row budget read from `tui.terminal.rows`.
+  > `ScrollView` looks like the answer and is not: it needs the layout
+  > pass, which `compositeOverlays` does not run.
+  >
+  > **Finished messages are cached and the arriving reply is not.** A
+  > streaming reply changes on every token; rebuilding the whole
+  > transcript for each one would re-parse every message's markdown.
+  > `session.state.streamingMessage` gets one component updated in
+  > place, and the rest are rebuilt only when a message arrives.
+  >
+  > **A queued subagent can be opened before it has a session at all**,
+  > so the view says it is waiting and subscribes on the registry change
+  > that brings the session. Reading the session is enough to *draw* it;
+  > only the subscription keeps the view following it, which is what one
+  > mutation caught the test not checking.
+
+- [x] **Task 10.2**: Steer from the viewer.
 
   Enter opens a composer; submitting calls `steerSubagent(record, text)`.
   An empty submit or escape returns without sending.
 
-- [ ] **Task 10.3**: Stay open when the subagent finishes.
+  > [!NOTE]
+  > **The composer is pi-tui's `Input`**, which already handles
+  > printable keys, backspace, the kill ring and cursor movement, and
+  > reports enter and escape through `onSubmit`/`onEscape`. It is told
+  > `focused = true` so it draws a cursor, even though focus belongs to
+  > the view.
+  >
+  > **Whitespace is not a message.** `!value.trim()` rather than
+  > `!value`, so a stray space does not steer a subagent with nothing.
+  >
+  > **A finished subagent is refused before the composer opens**, not
+  > after the message is typed. Typing a message that is then thrown
+  > away is worse than being told at the outset, and the footer stops
+  > offering `enter steer` at the same moment.
+  >
+  > **The bar above the composer stays**, saying `enter sends · esc
+  > abandons`. The composer takes escape, so without it the only way
+  > out of a half-typed message is a guess.
+
+- [x] **Task 10.3**: Stay open when the subagent finishes.
 
   The viewer must survive completion so the final output is readable —
   it closes only on escape.
 
-- [ ] **Task 10.4**: Announce a subagent the user stopped from the UI.
+  > [!NOTE]
+  > This came free from drawing the child's messages rather than a copy:
+  > `session.messages` reads `agent.state.messages`
+  > (`agent-session.js:653`) and `dispose()` only detaches listeners
+  > (`:556`), so the runner disposing the session at the end of the run
+  > leaves the transcript readable. What the view loses at that point is
+  > its subscription — and there is nothing further to follow.
+
+- [x] **Task 10.4**: Announce a subagent the user stopped from the UI.
 
   Left open by Slice 6, and only reachable once there is a UI to stop
   one from. `stopSubagent` sends no completion notice: on the tool path
@@ -1623,6 +1699,40 @@ That has a direct consequence for how the work is handed out.
   `runAndAnnounce` reports. Wiring `sendMessage` into the UI's stop path
   is the fix. Deliberately not built in Slice 6, where nothing could
   reach it.
+
+  > [!NOTE]
+  > **There was no UI stop path to wire, so this slice added one.** The
+  > user chose to add it on both surfaces: `delete` on the selected row
+  > in the list, and `delete` in the open view. `delete` rather than a
+  > letter because the list only takes keys at an empty prompt and must
+  > never swallow typing, and rather than a `ctrl` chord because pi has
+  > already claimed nearly all of them — `ctrl+x` is
+  > `app.message.copy` (`core/keybindings.js:39`). At an empty prompt
+  > `delete` does nothing anyway, so taking it costs the editor nothing.
+  > The specification has no scenario for stopping from the UI; that is
+  > a gap for a `to-spec` pass, listed with the others.
+  >
+  > **Only a subagent that never started is announced.** `stopFromUi`
+  > lives in `src/spawn.ts` beside the announcement it needs, wraps
+  > `stopSubagent`, and sends a notice only when the record was
+  > `queued` — a running one settles into a stopped outcome that
+  > `runAndAnnounce` already reports, and announcing both would have the
+  > main model reading one stop as two.
+  >
+  > **A refused stop announces nothing**, which is not the same
+  > condition as the above and mutation testing proved the tests were
+  > not separating them: a queued subagent that has just been handed a
+  > slot cannot be cancelled, and a notice sent anyway would tell the
+  > model to stop waiting for a subagent still working.
+  >
+  > The send itself was extracted from `runAndAnnounce` as `announce`,
+  > so both paths deliver the same notice the same way — `followUp`
+  > with `triggerTurn`.
+  >
+  > **A refusal from the list is spoken through `ctx.ui.notify`.** A
+  > stop that worked shows in the row's own status; a refusal has
+  > nowhere to appear among rows. In the view it goes in the footer,
+  > next to the key that was pressed.
 
 ### Slice 11: Addressing a subagent by name
 
@@ -1752,7 +1862,9 @@ That has a direct consequence for how the work is handed out.
 | `src/mention.ts`          | New — `@name` parsing                      |
 | `src/ui/layout.ts`        | New — column splitting                     |
 | `src/ui/subagent-list.ts` | New — the list and its key handling        |
-| `src/ui/viewer.ts`        | New — live conversation view               |
+| `src/ui/status.ts`        | New — one glyph and colour per status       |
+| `src/ui/transcript.ts`    | New — child messages as pi's components     |
+| `src/ui/subagent-viewer.ts` | New — live conversation view (was `viewer.ts` in this sketch) |
 | `test/*.test.ts`          | New — one file per seam plus unit tests    |
 | `agents/*.md`             | New — example agent definitions            |
 | `README.md`, `CONTEXT.md` | New                                        |

@@ -35,9 +35,11 @@ import {
 	renderCompletion,
 	type SendMessage,
 	startSubagent,
+	stopFromUi,
 } from "./spawn.ts";
 import { DEFAULT_MAX_TURNS } from "./turns.ts";
 import { SubagentList } from "./ui/subagent-list.ts";
+import { SubagentViewer } from "./ui/subagent-viewer.ts";
 
 export const SPAWN_TOOL_NAME = "spawn_subagent";
 export const RESULT_TOOL_NAME = "get_subagent_result";
@@ -615,6 +617,9 @@ export default function (pi: ExtensionAPI): void {
 	// tool that reads it, and one queue holding them all to the limit.
 	const registry = new SubagentRegistry();
 	const queue = new SubagentQueue(configuredLimit(process.cwd()));
+	// Bound once, because it is called from background continuations and from the
+	// UI, neither of which has a `pi` of its own.
+	const sendMessage: SendMessage = pi.sendMessage.bind(pi);
 
 	pi.registerTool(
 		createSpawnTool({
@@ -625,9 +630,7 @@ export default function (pi: ExtensionAPI): void {
 			getKnownTools: () => pi.getAllTools().map((tool) => tool.name),
 			registry,
 			queue,
-			// Bound, because it is called later from a background continuation
-			// that has no `pi` of its own.
-			sendMessage: pi.sendMessage.bind(pi),
+			sendMessage,
 		}),
 	);
 
@@ -644,6 +647,34 @@ export default function (pi: ExtensionAPI): void {
 			return;
 		}
 
+		/**
+		 * Show one subagent's conversation over the session, until it is closed.
+		 *
+		 * `ctx.ui.custom` hands the view the keyboard and resolves when the view
+		 * calls the `done` it was given, which is what the list waits on before it
+		 * starts taking keys again.
+		 */
+		const openViewer = (record: SubagentRecord): Promise<void> =>
+			ctx.ui.custom<void>(
+				(tui, theme, _keybindings, done) =>
+					new SubagentViewer({
+						record,
+						registry,
+						theme,
+						tui,
+						cwd: ctx.cwd,
+						close: () => done(),
+						stop: (stopping) =>
+							stopFromUi(stopping, { registry, queue }, sendMessage),
+					}),
+				{
+					overlay: true,
+					// Wide enough for a transcript to read as prose, and short enough
+					// that the session it belongs to stays visible around it.
+					overlayOptions: { width: "90%", maxHeight: "85%" },
+				},
+			);
+
 		ctx.ui.setWidget(
 			SUBAGENT_LIST_WIDGET,
 			// Built per mount rather than once: the theme arrives here, and a theme
@@ -658,6 +689,21 @@ export default function (pi: ExtensionAPI): void {
 					// arrow was meant for the list or for the cursor.
 					addInputListener: (listener) => tui.addInputListener(listener),
 					getEditorText: () => ctx.ui.getEditorText(),
+					onOpen: openViewer,
+					// A stop that worked shows in the row's own status. A refusal has
+					// nowhere to appear in a list of rows, so it is said out loud.
+					onStop: (record) => {
+						void stopFromUi(record, { registry, queue }, sendMessage).then(
+							(result) => {
+								if (!result.ok) {
+									ctx.ui.notify(
+										`Cannot stop "${record.handle}": ${result.reason}.`,
+										"warning",
+									);
+								}
+							},
+						);
+					},
 				}),
 			{ placement: "belowEditor" },
 		);
