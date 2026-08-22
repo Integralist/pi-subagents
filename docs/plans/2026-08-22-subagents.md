@@ -163,7 +163,7 @@ That has a direct consequence for how the work is handed out.
   on load, so no build step is needed for the extension to run. Add
   `tsconfig.json`, `biome.json`, and `vitest.config.ts`.
 
-- [ ] **Task 1.3**: Implement agent discovery in `src/agents.ts`.
+- [x] **Task 1.3**: Implement agent discovery in `src/agents.ts`.
 
   Markdown files with YAML frontmatter, read from `.pi/agents/*.md`
   (project) and `<agentDir>/agents/*.md` (user), project overriding
@@ -195,6 +195,28 @@ That has a direct consequence for how the work is handed out.
 
   Given a directory with two agent files and one malformed, when
   discovery runs, then two configs are returned and no error is thrown.
+
+  > [!IMPORTANT]
+  > **`parseFrontmatter` throws — the guard has to wrap the parse, not
+  > just the field checks.** Malformed YAML raises `YAMLParseError`, so
+  > checking `name` and `description` afterwards is too late. Pi's own
+  > `examples/extensions/subagent/agents.ts` parses unguarded and
+  > therefore loses a whole directory to one bad file; do not copy it
+  > verbatim.
+
+  Two refinements landed with the implementation:
+
+  - **Project discovery walks up from `cwd`** looking for
+    `.pi/agents`, matching Pi's example, so a subagent can be started
+    from a directory deep inside the checkout.
+  - **Results are sorted by name.** Task 1.7 builds the tool
+    description from these names, and unsorted `Map` order would let it
+    shuffle between runs.
+
+  Tool-name validation from Notes & Caveats is **deferred to Task
+  1.7**. Discovery cannot see Pi's registered tool names — that list
+  only exists once the extension holds an `ExtensionAPI` — and
+  hardcoding the built-ins here would rot on every Pi upgrade.
 
 - [ ] **Task 1.4**: Implement `runSubagent()` in `src/runner.ts`.
 
