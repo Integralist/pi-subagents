@@ -674,7 +674,7 @@ That has a direct consequence for how the work is handed out.
 - **Execution**: **Main thread.** Wires into Pi's message delivery and event
   stream; behaviour needs observing, not just reading.
 
-- [ ] **Task 3.1**: Define the record and registry in `src/registry.ts`.
+- [x] **Task 3.1**: Define the record and registry in `src/registry.ts`.
 
   ```typescript
   export type SubagentStatus =
@@ -694,9 +694,15 @@ That has a direct consequence for how the work is handed out.
     turns: number;
   }
 
+  export type SubagentRecordChanges = Partial<Omit<SubagentRecord, "id">>;
+
   export class SubagentRegistry {
     add(record: SubagentRecord): void;
     get(idOrHandle: string): SubagentRecord | undefined;
+    update(
+      idOrHandle: string,
+      changes: SubagentRecordChanges,
+    ): SubagentRecord | undefined;
     list(): SubagentRecord[];        // launch order, earliest first
     running(): SubagentRecord[];
     onChange(listener: () => void): () => void;
@@ -704,6 +710,23 @@ That has a direct consequence for how the work is handed out.
   ```
 
   `onChange` is what the UI in Slice 8 subscribes to.
+
+  > [!NOTE]
+  > **Delivered with an `update` method the sketch above lacked.** Tasks
+  > 3.2 and 3.4 both change a record after it is added — `contextPercent`,
+  > `turns`, `status`, `outcome` — and mutating the object returned by
+  > `get()` notifies nobody, so the Slice 8 list would render a status
+  > that had already moved on. Routing every write through one method
+  > makes the notification impossible to forget. `Omit<…, "id">` keeps a
+  > record's identity out of reach.
+  >
+  > Two further decisions, both mutation-tested. `list()` sorts on
+  > `startedAt` rather than trusting insertion order, so a record added
+  > late — a session resumed in Slice 7 — still lands in launch order;
+  > the sort is stable, so subagents launched in the same millisecond
+  > keep their add order. `running()` counts only `running`, excluding
+  > `queued`, because Slice 4 compares that count against the
+  > concurrency limit and counting the queue would wedge it shut.
 
 - [ ] **Task 3.2**: Track context-window use per subagent.
 
