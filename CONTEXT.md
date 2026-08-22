@@ -17,6 +17,13 @@ subagent: `.pi/agents/explore.md`. Its parsed form is an `AgentConfig`. The
 names when it delegates. An agent file is a definition; a subagent is a run of
 one.
 
+**Tier** — one of the three directories agent files are read from, in order:
+**built-in** (the ones shipped with this extension), **user**
+(`~/.pi/agent/agents/`) and **project** (`<project>/.pi/agents/`). The nearest
+tier wins a name collision, so a project file replaces a user one and either
+replaces a built-in. A record's `source` names the tier its agent file came
+from.
+
 **Main model** — the model in the user's own conversation, as distinct from a
 subagent's. Its conversation is the **main conversation**, and `@main` is the
 reserved handle that addresses it. Never "parent agent" for the model, though

@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Reviews a change for defects, and reports only what it can point at
+description: Reviews code for defects in prose, when one reviewer is enough and no dimension split is wanted
 tools: [read, grep, find, ls, bash]
 color: yellow
 thinking: high

@@ -226,6 +226,26 @@ That has a direct consequence for how the work is handed out.
   only exists once the extension holds an `ExtensionAPI` — and
   hardcoding the built-ins here would rot on every Pi upgrade.
 
+  > [!NOTE]
+  > **A third tier was added after the plan was finished**, below the two
+  > sketched here: `<extension>/agents/*.md`, the agent files shipped with
+  > this extension, at the lowest precedence. pi installs no agents of its
+  > own — its package manager collects extensions, skills, prompts and
+  > themes and knows nothing of agents
+  > (`core/package-manager.js:1785`) — so an installed extension used to
+  > offer the main model nothing to delegate to until the user had written
+  > or copied an agent file.
+  >
+  > `discoverAgents(cwd, builtinDir?)` takes the directory as a seam.
+  > Production resolves it from the module's own location, since a session
+  > runs anywhere and the extension lives wherever pi cloned it; every test
+  > passes a temporary directory, so the shipped files cannot leak into an
+  > expectation. One suite deliberately reads the real one, which is what
+  > catches a typo in a file that ships.
+  >
+  > `AgentConfig.source` gained `"builtin"` alongside `"user"` and
+  > `"project"`, so the tool description can say where an agent came from.
+
 - [x] **Task 1.4**: Implement `runSubagent()` in `src/runner.ts`.
 
   ```typescript
@@ -1982,7 +2002,7 @@ That has a direct consequence for how the work is handed out.
 
 ### Verification
 
-- [x] `npx vitest run` passes — 518 tests. `make test`.
+- [x] `npx vitest run` passes — 528 tests. `make test`.
 - [x] `npx tsc --noEmit` passes. `make typecheck`.
 - [x] `npx biome check src/ test/` passes. `make lint`.
 - [ ] Load into a real session with `pi -e ./src/index.ts` and walk

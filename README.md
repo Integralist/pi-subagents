@@ -27,9 +27,8 @@ main-model turn.
 From a clone of this repository:
 
 ```bash
-make install     # npm install
-make agents      # copy the example agents into .pi/agents
-make try         # opens pi with this extension loaded
+make install   # npm install
+make try       # opens pi with this extension loaded
 ```
 
 `make try` runs `pi -e ./src/index.ts`, which loads the extension for that
@@ -39,27 +38,28 @@ list appear under the prompt.
 
 ## Install it for real
 
-`-e` is per-session. To keep the extension across sessions, install this
-directory as a package:
+`-e` is per-session. To keep the extension, install it as a package — from the
+remote, or from a clone:
 
 ```bash
-pi install .          # adds it to ~/.pi/agent/settings.json
-pi install . -l       # or to this project only, in .pi/settings.json
-pi list               # confirm it is there
-pi remove .           # undo either of the above
+pi install git:github.com/Integralist/pi-subagents      # every project
+pi install git:github.com/Integralist/pi-subagents -l   # this project only
+pi install .                                            # or from a clone
 ```
+
+| Command                      | Effect                                          |
+| ---------------------------- | ----------------------------------------------- |
+| `pi list`                    | Show what is installed, and in which scope      |
+| `pi update <source>`         | Pull new commits                                |
+| `pi remove <source>`         | Uninstall                                       |
+| `pi install <source>@v0.1.0` | Pin a tag, branch or commit; stops auto-updates |
 
 pi reads the `pi.extensions` field of `package.json`, so it picks up
-`./src/index.ts` on its own. There is no build step: pi loads the TypeScript
-sources directly.
+`./src/index.ts` on its own. There is no build step and nothing to vendor: pi's
+extension loader resolves `@earendil-works/*` and `typebox` to its own copies,
+so an installed extension needs no `node_modules` of its own.
 
-Agents are not installed with the package. Copy the examples where a session
-will look for them, or write your own:
-
-```bash
-make agents                          # this project: .pi/agents/
-cp agents/*.md ~/.pi/agent/agents/   # every project
-```
+The agents in `agents/` come with it — see below.
 
 ## Testing your copy
 
@@ -71,7 +71,7 @@ That is the four checks this repository holds itself to:
 
 | Target            | What it does                                     |
 | ----------------- | ------------------------------------------------ |
-| `make test`       | 518 tests under `vitest`                         |
+| `make test`       | 528 tests under `vitest`                         |
 | `make typecheck`  | `tsc --noEmit`                                   |
 | `make lint`       | `biome check src test`                           |
 | `make load-check` | loads the extension through pi's own jiti loader |
@@ -80,13 +80,40 @@ That is the four checks this repository holds itself to:
 green suite does not prove pi can load the extension at all. `make watch` reruns
 the tests as you edit, and `make` on its own lists every target.
 
-## Defining a subagent
+## The agents that come with it
 
-An agent is a Markdown file with YAML frontmatter. Two directories are read, and
-the project's wins on a name collision:
+Nine agent files ship in `agents/`, and they are found without being installed
+or copied. Discovery reads three directories, each overriding the one before it:
 
+1. `<extension>/agents/*.md` — these, wherever pi put the extension
 1. `~/.pi/agent/agents/*.md` — yours, in every project
 1. `<project>/.pi/agents/*.md` — this checkout's
+
+A file of your own named `explore.md` replaces the shipped `explore` outright.
+`make agents` copies the shipped set into `.pi/agents/`, for when you would
+rather edit them than override them.
+
+| Agent             | For                                                      |
+| ----------------- | -------------------------------------------------------- |
+| `explore`         | Reading around the codebase and reporting back           |
+| `reviewer`        | A single-reviewer pass over a change, answering in prose |
+| `scribe`          | Writing or revising documentation                        |
+| `behaviour`       | Code review: intended behaviour, regressions, tests      |
+| `security`        | Code review: trust boundaries, injection, abuse          |
+| `reliability`     | Code review: correctness, concurrency, error paths       |
+| `maintainability` | Code review: conventions, readability, API shape         |
+| `plan-adherence`  | Code review: the change against the plan it implements   |
+| `verifier`        | Trying to refute a finding, so only real ones survive    |
+
+The last six are shaped for a dimension-split code review: each stays inside one
+dimension, is read-only (`tools: [read, grep, find, ls]` — no `bash`, so nothing
+can change state or comment on a pull request), and answers in the findings JSON
+that a review skill expects. See "Running a dimension-split review" below.
+
+## Defining a subagent
+
+An agent is a Markdown file with YAML frontmatter, in one of the three
+directories above.
 
 ```markdown
 ---
@@ -194,6 +221,56 @@ is steered, one still queued takes it into the task it starts on, one that has
 finished continues from its stored conversation, and a name with no subagent
 behind it yet starts one with your message as its task. A confirmation — or the
 reason it could not be delivered — appears as a notification.
+
+## Running a dimension-split review
+
+A code-review skill that splits a review across dimensions — behaviour,
+security, reliability, maintainability, plan adherence — has everything it needs
+here. The six review agents are the roles; the skill supplies the inputs.
+
+The flow, once the skill has gathered the diff once into a temp file:
+
+1. The main model spawns one subagent per dimension, passing the paths rather
+   than the diff itself, so the diff is tokenized once instead of five times:
+
+   ```txt
+   spawn_subagent(
+     subagent_type="security",
+     description="security review",
+     prompt="Review the diff at $TMPDIR/code-review.diff against the
+             context at $TMPDIR/review-context.md.
+             FILE_LIST: src/queue.ts, src/spawn.ts")
+   ```
+
+1. Four dimensions, or five with a plan, run at once — the default concurrency
+   limit is 5, so nothing queues. A lower limit still works: the extra ones
+   start as slots free.
+
+1. Each answer arrives in the conversation on its own when that subagent
+   finishes. The main model can also read one early with `get_subagent_result`,
+   which is how it checks whether the others are still working before it moves
+   on to verification.
+
+1. The verification wave spawns `verifier` subagents, one per finding or a batch
+   each. Past five they queue, which is exactly the batching a capped platform
+   would do by hand.
+
+Because handles come from agent names, each dimension is addressable while it
+works and after it finishes:
+
+```txt
+@security you skipped src/auth.ts — the token check moved, look again
+@maintainability which peer file did you cite for the naming claim?
+```
+
+A mention to a subagent that has finished continues its stored conversation, so
+it still has the diff, the context and its own findings in view. Verifiers are
+`@verifier`, `@verifier-2`, `@verifier-3` in spawn order.
+
+Two things to know. Each dimension agent is read-only by construction — its
+`tools:` list has no `bash`, so it cannot comment on a pull request or change a
+file even if asked. And each returns the findings JSON as its final message,
+which is what `get_subagent_result` hands back verbatim.
 
 ## Settings
 
