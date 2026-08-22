@@ -8,7 +8,6 @@
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 
 export type ResolveModelResult =
 	| { ok: true; model: Model<Api> }
@@ -25,7 +24,7 @@ export type ResolveModelResult =
 	  };
 
 /** How a model is named back to the caller: unambiguous, and copy-pasteable. */
-function label(model: Model<Api>): string {
+export function modelLabel(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
 
@@ -38,17 +37,21 @@ function label(model: Model<Api>): string {
  * narrower one failed, which is harder to predict than simply refusing.
  */
 const TIERS: ReadonlyArray<(model: Model<Api>, query: string) => boolean> = [
-	(model, query) => label(model).toLowerCase() === query,
+	(model, query) => modelLabel(model).toLowerCase() === query,
 	(model, query) => model.id.toLowerCase() === query,
 	(model, query) => model.id.toLowerCase().includes(query),
 	(model, query) => model.name.toLowerCase().includes(query),
 ];
 
+/**
+ * Resolve against an explicit list rather than a registry, so the caller
+ * decides which models are even candidates — the scoped set a user configured,
+ * say, rather than every model in the catalogue.
+ */
 export function resolveModel(
-	registry: ModelRegistry,
+	models: readonly Model<Api>[],
 	query: string,
 ): ResolveModelResult {
-	const models = registry.getAll();
 	const needle = query.trim().toLowerCase();
 
 	if (needle !== "") {
@@ -61,11 +64,11 @@ export function resolveModel(
 				return {
 					ok: false,
 					reason: "ambiguous",
-					available: hits.map(label),
+					available: hits.map(modelLabel),
 				};
 			}
 		}
 	}
 
-	return { ok: false, reason: "unknown", available: models.map(label) };
+	return { ok: false, reason: "unknown", available: models.map(modelLabel) };
 }

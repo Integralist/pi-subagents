@@ -1,3 +1,4 @@
+import type { Api, Model } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -23,8 +24,78 @@ function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	};
 }
 
-function fakeContext(): ExtensionContext {
-	return { cwd: "/tmp/project" } as unknown as ExtensionContext;
+function fakeModel(provider: string, id: string, name = id): Model<Api> {
+	return { provider, id, name } as unknown as Model<Api>;
+}
+
+const GEMINI_FLASH = fakeModel(
+	"google",
+	"gemini-2.5-flash",
+	"Gemini 2.5 Flash",
+);
+const CLAUDE_OPUS = fakeModel(
+	"anthropic",
+	"claude-opus-4-5",
+	"Claude Opus 4.5",
+);
+/** Two of these, so "gpt" is an ambiguous query. */
+const CATALOGUE = [
+	GEMINI_FLASH,
+	CLAUDE_OPUS,
+	fakeModel("openai", "gpt-4"),
+	fakeModel("openai", "gpt-4-turbo"),
+];
+
+/** Two flash models, so "flash" is ambiguous the way it is for a real user. */
+const FLASH_36 = fakeModel(
+	"google-vertex",
+	"gemini-3.6-flash",
+	"Gemini 3.6 Flash",
+);
+const FLASH_37 = fakeModel(
+	"google-vertex",
+	"gemini-3.7-flash",
+	"Gemini 3.7 Flash",
+);
+
+interface ContextOptions {
+	/** Resolved from enabledModels / --models. Empty means unscoped. */
+	scoped?: Model<Api>[];
+	available?: Model<Api>[];
+	all?: Model<Api>[];
+	hasUI?: boolean;
+	/** What the user picks in the dialog; undefined means they dismissed it. */
+	pick?: string | undefined;
+}
+
+let selectCalls: Array<{
+	title: string;
+	options: string[];
+	signal?: AbortSignal;
+}>;
+
+function fakeContext(options: ContextOptions = {}): ExtensionContext {
+	return {
+		cwd: "/tmp/project",
+		hasUI: options.hasUI ?? true,
+		scopedModels: (options.scoped ?? []).map((model) => ({ model })),
+		modelRegistry: {
+			getAvailable: () => options.available ?? [],
+			getAll: () => options.all ?? CATALOGUE,
+		},
+		ui: {
+			select: vi.fn(
+				async (
+					title: string,
+					opts: string[],
+					dialog?: { signal?: AbortSignal },
+				) => {
+					selectCalls.push({ title, options: opts, signal: dialog?.signal });
+					return options.pick;
+				},
+			),
+		},
+	} as unknown as ExtensionContext;
 }
 
 /** Text content joined out of a tool result, the way the model would read it. */
@@ -73,6 +144,7 @@ const VALID_ARGS = {
 let ctx: ExtensionContext;
 
 beforeEach(() => {
+	selectCalls = [];
 	ctx = fakeContext();
 });
 
@@ -247,6 +319,376 @@ describe("spawn_subagent", () => {
 
 		expect(resultText(result)).toContain("got halfway");
 		expect((result.details as { status: string }).status).toBe("stopped");
+	});
+});
+
+describe("spawn_subagent model and effort overrides", () => {
+	// The specification's scenario, quoted.
+	it("Honours an explicit model and effort", async () => {
+		const { tool, run } = harness();
+
+		await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "flash", thinking: "low" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run.mock.calls[0]?.[0].model).toBe(GEMINI_FLASH);
+		expect(run.mock.calls[0]?.[0].thinkingLevel).toBe("low");
+	});
+
+	// The specification's scenario, quoted.
+	it("Resolves a partial model name", async () => {
+		const { tool, run } = harness();
+
+		await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "flash" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run.mock.calls[0]?.[0].model).toBe(GEMINI_FLASH);
+	});
+
+	// The specification's scenario, quoted.
+	it("Refuses an unknown model name", async () => {
+		const { tool, run } = harness();
+
+		await expect(
+			tool.execute(
+				"call-1",
+				{ ...VALID_ARGS, model: "nope" },
+				undefined,
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow(/gemini-2\.5-flash[\s\S]*claude-opus-4-5/);
+
+		// And no subagent starts.
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// Ambiguity used to refuse outright. It now asks the user instead, covered
+	// by "spawn_subagent ambiguous model selection" below — including the
+	// refusal that still applies when no dialog-capable UI exists.
+
+	// The specification's scenario, quoted.
+	it("Inherits the parent model and effort by default", async () => {
+		const { tool, run } = harness();
+
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+
+		// Nothing forced, so runSubagent falls back to the parent's own.
+		expect(run.mock.calls[0]?.[0].model).toBeUndefined();
+		expect(run.mock.calls[0]?.[0].thinkingLevel).toBeUndefined();
+	});
+
+	it("lets the caller's model win over the agent file's", async () => {
+		const { tool, run } = harness({
+			agents: [agentConfig({ model: "opus" })],
+		});
+
+		await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "flash" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run.mock.calls[0]?.[0].model).toBe(GEMINI_FLASH);
+	});
+
+	it("uses the agent file's model when the caller names none", async () => {
+		const { tool, run } = harness({
+			agents: [agentConfig({ model: "opus" })],
+		});
+
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+
+		expect(run.mock.calls[0]?.[0].model).toBe(CLAUDE_OPUS);
+	});
+
+	it("lets the caller's effort win over the agent file's", async () => {
+		const { tool, run } = harness({
+			agents: [agentConfig({ thinking: "xhigh" })],
+		});
+
+		await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, thinking: "minimal" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run.mock.calls[0]?.[0].thinkingLevel).toBe("minimal");
+	});
+
+	it("accepts `off` as an effort level, as pi's own flag does", async () => {
+		const { tool, run } = harness();
+
+		await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, thinking: "off" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run.mock.calls[0]?.[0].thinkingLevel).toBe("off");
+	});
+
+	it("refuses an agent file naming a model that is not configured", async () => {
+		const { tool, run } = harness({
+			agents: [agentConfig({ model: "hallucinated-model" })],
+		});
+
+		await expect(
+			tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx),
+		).rejects.toThrow(/hallucinated-model/);
+
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("offers every thinking level pi defines in the schema", () => {
+		const { tool } = harness();
+		const schema = tool.parameters as {
+			properties: { thinking?: { enum?: string[] } };
+		};
+
+		expect(schema.properties.thinking?.enum).toEqual([
+			"off",
+			"minimal",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
+	});
+
+	it("leaves model and thinking optional in the schema", () => {
+		const { tool } = harness();
+		const schema = tool.parameters as { required?: string[] };
+
+		expect(schema.required).not.toContain("model");
+		expect(schema.required).not.toContain("thinking");
+	});
+});
+
+/**
+ * Which models a query may resolve to. A catalogue holds models a user has no
+ * access to, so resolving against all of them would happily pick one that
+ * cannot run.
+ */
+describe("spawn_subagent model candidates", () => {
+	it("resolves against the scoped models when scoping is configured", async () => {
+		const { tool, run } = harness();
+		ctx = fakeContext({
+			scoped: [FLASH_37],
+			available: [FLASH_36, FLASH_37],
+			all: CATALOGUE,
+		});
+
+		await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "flash" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		// Unambiguous within the scoped set, even though it is not within the
+		// wider catalogue.
+		expect(run.mock.calls[0]?.[0].model).toBe(FLASH_37);
+		expect(selectCalls).toHaveLength(0);
+	});
+
+	it("cannot resolve a catalogue model that scoping excludes", async () => {
+		const { tool, run } = harness();
+		ctx = fakeContext({
+			scoped: [FLASH_37],
+			all: [...CATALOGUE, fakeModel("nowhere", "made-up-foo-flash")],
+		});
+
+		await expect(
+			tool.execute(
+				"call-1",
+				{ ...VALID_ARGS, model: "made-up-foo-flash" },
+				undefined,
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow(/unknown model/i);
+
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("falls back to models with configured auth when nothing is scoped", async () => {
+		const { tool, run } = harness();
+		ctx = fakeContext({
+			scoped: [],
+			available: [CLAUDE_OPUS],
+			all: CATALOGUE,
+		});
+
+		await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "opus" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run.mock.calls[0]?.[0].model).toBe(CLAUDE_OPUS);
+	});
+
+	it("falls back to the whole catalogue when neither is configured", async () => {
+		const { tool, run } = harness();
+		ctx = fakeContext({ scoped: [], available: [], all: CATALOGUE });
+
+		await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "flash" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run.mock.calls[0]?.[0].model).toBe(GEMINI_FLASH);
+	});
+});
+
+describe("spawn_subagent ambiguous model selection", () => {
+	it("asks the user to choose when a query matches more than one model", async () => {
+		const { tool, run } = harness();
+		ctx = fakeContext({
+			scoped: [FLASH_36, FLASH_37],
+			pick: "google-vertex/gemini-3.7-flash",
+		});
+
+		await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "flash" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(selectCalls).toHaveLength(1);
+		expect(selectCalls[0]?.options).toEqual([
+			"google-vertex/gemini-3.6-flash",
+			"google-vertex/gemini-3.7-flash",
+		]);
+		// The title names the subagent, so the prompt is not context-free.
+		expect(selectCalls[0]?.title).toContain("reviewer");
+		expect(run.mock.calls[0]?.[0].model).toBe(FLASH_37);
+	});
+
+	it("passes the abort signal so the dialog dies with the turn", async () => {
+		const { tool } = harness();
+		ctx = fakeContext({
+			scoped: [FLASH_36, FLASH_37],
+			pick: "google-vertex/gemini-3.6-flash",
+		});
+		const signal = new AbortController().signal;
+
+		await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "flash" },
+			signal,
+			undefined,
+			ctx,
+		);
+
+		expect(selectCalls[0]?.signal).toBe(signal);
+	});
+
+	it("inherits the parent's model when the user dismisses the dialog", async () => {
+		const { tool, run } = harness();
+		ctx = fakeContext({ scoped: [FLASH_36, FLASH_37], pick: undefined });
+
+		await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "flash" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run).toHaveBeenCalledOnce();
+		expect(run.mock.calls[0]?.[0].model).toBeUndefined();
+	});
+
+	it("says in the result that it fell back, so the choice is not silent", async () => {
+		const { tool } = harness();
+		ctx = fakeContext({ scoped: [FLASH_36, FLASH_37], pick: undefined });
+
+		const result = await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "flash" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(resultText(result)).toMatch(/current model|parent/i);
+	});
+
+	it("refuses instead of asking when there is no dialog-capable UI", async () => {
+		const { tool, run } = harness();
+		ctx = fakeContext({ scoped: [FLASH_36, FLASH_37], hasUI: false });
+
+		await expect(
+			tool.execute(
+				"call-1",
+				{ ...VALID_ARGS, model: "flash" },
+				undefined,
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow(/matches more than one/i);
+
+		// Blocking on a dialog nobody can see would hang a headless run.
+		expect(selectCalls).toHaveLength(0);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("does not ask about an unknown model, only an ambiguous one", async () => {
+		const { tool } = harness();
+		ctx = fakeContext({ scoped: [FLASH_36, FLASH_37] });
+
+		await expect(
+			tool.execute(
+				"call-1",
+				{ ...VALID_ARGS, model: "totally-absent" },
+				undefined,
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow(/unknown model/i);
+
+		expect(selectCalls).toHaveLength(0);
+	});
+
+	it("asks about an ambiguous model named by the agent file too", async () => {
+		const { tool, run } = harness({
+			agents: [agentConfig({ model: "flash" })],
+		});
+		ctx = fakeContext({
+			scoped: [FLASH_36, FLASH_37],
+			pick: "google-vertex/gemini-3.6-flash",
+		});
+
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+
+		expect(selectCalls).toHaveLength(1);
+		expect(run.mock.calls[0]?.[0].model).toBe(FLASH_36);
 	});
 });
 

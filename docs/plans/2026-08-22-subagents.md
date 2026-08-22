@@ -32,6 +32,7 @@ bundles these and requires a `"*"` range, not a floor
 
 ```json
 "peerDependencies": {
+  "@earendil-works/pi-agent-core": "*",
   "@earendil-works/pi-ai": "*",
   "@earendil-works/pi-coding-agent": "*",
   "@earendil-works/pi-tui": "*",
@@ -45,8 +46,11 @@ bundles these and requires a `"*"` range, not a floor
 > alongside the `@earendil-works/*` packages as something to declare as
 > a peer and never bundle. Declaring it in `dependencies` would install
 > a second copy whose `Type` symbols fail Pi's schema identity checks.
-> The same list also includes `@earendil-works/pi-agent-core`; add it
-> as a peer only once something here imports it.
+
+`@earendil-works/pi-agent-core` joined the peers in Task 2.2. It owns
+the `ThinkingLevel` that pi's own session and extension surfaces use —
+the one including `"off"` — where `pi-ai` exports a narrower type of the
+same name.
 
 Third-party runtime dependencies — none so far — belong in
 `dependencies`. Pi package installation uses production installs
@@ -562,12 +566,22 @@ That has a direct consequence for how the work is handed out.
   - **Comparisons are case-insensitive and the query is trimmed**,
     including the two "exact" tiers. A caller typing `"Flash"` meant
     `flash`.
-  - **`getAll()`, per the plan, not `getAvailable()`.** A model that
-    exists but has no configured auth still resolves, so the failure
-    surfaces as a provider auth error naming the model rather than
-    "unknown model". Worth revisiting if that proves confusing.
+  - **Takes a model list, not a `ModelRegistry`.** The signature in this
+    task said `registry`, but the caller has to decide *which* models
+    are candidates — see Task 2.2 — so a registry is the wrong
+    parameter. `resolveModel(models, query)` is a pure function over a
+    list, and `modelLabel` is exported alongside it so a caller can map
+    a chosen label back to its model.
 
-- [ ] **Task 2.2**: Add `model` and `thinking` to the tool schema.
+  > [!NOTE]
+  > **The `getAll()` choice was revised in Task 2.2.** It read the whole
+  > catalogue, which lists models the user has no access to, so `"flash"`
+  > could resolve to something unrunnable. Candidate selection moved to
+  > the caller and now prefers the user's scoped set. The note that this
+  > was "worth revisiting if it proves confusing" was answered within
+  > the same slice.
+
+- [x] **Task 2.2**: Add `model` and `thinking` to the tool schema.
 
   ```typescript
   model: Type.Optional(Type.String({
@@ -588,19 +602,66 @@ That has a direct consequence for how the work is handed out.
   Frontmatter `model:` applies when the caller gives none; the caller
   wins when both are present.
 
-  > [!WARNING]
-  > **`ThinkingLevel` is not one type — the two packages disagree, and
-  > this task has to settle it.** `pi-agent-core/dist/types.d.ts:260`
-  > includes `"off"`; `pi-ai/dist/types.d.ts:23` does **not**, and
-  > names the with-`off` version `ModelThinkingLevel`. Slice 1 imported
-  > the type from `pi-ai`, so `AgentConfig.thinking` and
-  > `RunSubagentOptions.thinkingLevel` currently cannot hold `"off"`
-  > even though `createAgentSession` accepts it — and
-  > `THINKING_LEVELS` in `src/agents.ts` silently drops it from an
-  > agent file. Before adding `"off"` to this enum, either switch those
-  > imports to the `pi-agent-core` spelling or drop `"off"` from the
-  > enum. Note that YAML parses a bare `off` as boolean `false`, so an
-  > agent file has to write `thinking: "off"` regardless.
+  > [!IMPORTANT]
+  > **`ThinkingLevel` is not one type — settled here.**
+  > `pi-agent-core/dist/types.d.ts:260` includes `"off"`;
+  > `pi-ai/dist/types.d.ts:23` does **not**, naming the with-`off`
+  > version `ModelThinkingLevel`. Slice 1 imported from `pi-ai`, so
+  > `"off"` could not reach a child even though pi accepts it.
+  > **Resolved by importing `ThinkingLevel` from `pi-agent-core`** in
+  > `src/agents.ts`, `src/runner.ts`, and `src/index.ts`, and adding
+  > that package to `peerDependencies` (`"*"`) and `devDependencies`
+  > (`0.84.2`). Both pi surfaces this code feeds — 
+  > `CreateAgentSessionOptions.thinkingLevel` and
+  > `ExtensionContext.thinkingLevel` — use that spelling, and pi's own
+  > `--thinking` flag offers `off`, so dropping it would have lost a
+  > capability pi has. It is a type-only import of a package pi already
+  > bundles.
+
+  Precedence, in both directions: **the caller's argument wins over the
+  agent file, and naming neither inherits the parent.** Resolution
+  happens before the run starts, so a bad model name never fails
+  partway into a session.
+
+  Two behaviours beyond the plan's text, added on request once it was
+  clear `"flash"` is genuinely ambiguous against a real catalogue.
+
+  **Candidates are the models the user can actually run**, narrowest
+  set first: `ctx.scopedModels` (from `enabledModels` or `--models`),
+  else `registry.getAvailable()` (configured auth), else
+  `registry.getAll()`. Resolving against the full catalogue could
+  return a model the user has no access to — the concrete case being a
+  catalogue entry that is simply not theirs.
+
+  **An ambiguous name asks the user** through
+  `ctx.ui.select(title, options, { signal })`, which pi exposes for
+  exactly this. The abort signal is passed so the dialog dies with the
+  turn. Measured against a real 10-model `enabledModels`, `"opus"` and
+  `"gpt"` are both ambiguous, so this is the common case rather than an
+  edge one.
+
+  - **Dismissing the dialog inherits the parent's model.** Chosen
+    deliberately over refusing. The tool result then says the subagent
+    ran on the current model, so the substitution is visible to the
+    main agent rather than silent.
+  - **No dialog-capable UI (`ctx.hasUI === false`) still refuses**, with
+    the candidates listed. Blocking on a dialog nobody can see would
+    hang a `--print` or headless run.
+  - **An unknown name refuses rather than prompting.** A name matching
+    nothing is a mistake, not a decision, and turning every typo into a
+    dialog would train the user to dismiss them.
+
+  This supersedes the earlier "refuses an ambiguous model name" test,
+  which is removed; the no-UI refusal covers that path.
+
+  > [!NOTE]
+  > **A bare `thinking: off` in an agent file is the string `"off"`, not
+  > a boolean.** An earlier note in this plan claimed it had to be
+  > quoted, on the YAML 1.1 rule that reads `off`/`on`/`yes`/`no` as
+  > booleans. That is wrong here: pi parses with `yaml@2.9.0`, which
+  > follows YAML **1.2**, where only `true` and `false` are booleans.
+  > Verified against pi's own `parseFrontmatter`. No quoting needed;
+  > `thinking: false` *is* a boolean and is still dropped.
 
 ### Slice 3: Background execution, registry, and completion notices
 

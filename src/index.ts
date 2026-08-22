@@ -6,6 +6,8 @@
  * agent defined under `.pi/agents/` and a task for it.
  */
 
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import {
 	defineTool,
 	type ExtensionAPI,
@@ -13,9 +15,24 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { type AgentConfig, discoverAgents } from "./agents.ts";
+import { modelLabel, resolveModel } from "./model-resolver.ts";
 import { inChildContext, runSubagent, type SubagentOutcome } from "./runner.ts";
 
 export const SPAWN_TOOL_NAME = "spawn_subagent";
+
+/**
+ * Every effort level pi accepts, `off` included. A plain string `enum` rather
+ * than a union type, per the specification's provider-compatibility decision.
+ */
+const THINKING_LEVELS = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+] as const satisfies readonly ThinkingLevel[];
 
 /** What the tool reports back for logs and, from Slice 3, the subagent list. */
 export interface SpawnDetails {
@@ -36,10 +53,93 @@ export interface SpawnToolDeps {
 		ctx: ExtensionContext;
 		config: AgentConfig;
 		prompt: string;
-		thinkingLevel?: AgentConfig["thinking"];
+		model?: Model<Api>;
+		thinkingLevel?: ThinkingLevel;
 		signal?: AbortSignal;
 	}) => Promise<SubagentOutcome>;
 	getKnownTools: () => string[];
+}
+
+/**
+ * Which models a query may resolve to, narrowest set first.
+ *
+ * A catalogue lists models the user has no access to, so resolving against all
+ * of them would cheerfully pick one that cannot run. Scoping — `enabledModels`
+ * in settings, or `--models` — is the user's own statement of what they use, so
+ * it wins. Configured auth is the next best proxy. The full catalogue is a last
+ * resort for a session with neither.
+ */
+function candidateModels(ctx: ExtensionContext): readonly Model<Api>[] {
+	if (ctx.scopedModels.length > 0) {
+		return ctx.scopedModels.map((scoped) => scoped.model);
+	}
+
+	const available = ctx.modelRegistry.getAvailable();
+	return available.length > 0 ? available : ctx.modelRegistry.getAll();
+}
+
+interface ModelChoice {
+	model?: Model<Api>;
+	/** Set when an ambiguous query was dismissed and the parent's model stands. */
+	fellBack: boolean;
+}
+
+/**
+ * Pick the model for this run.
+ *
+ * Naming no model means inheriting the parent's, so `undefined` is a valid
+ * answer rather than a failure. An ambiguous name is a question for the user,
+ * not a guess: `"flash"` matching two Gemini releases is exactly the case where
+ * a human should choose. An unknown name is refused instead, because a name
+ * matching nothing is a mistake rather than a decision, and turning every typo
+ * into a dialog would train the user to dismiss them.
+ */
+async function chooseModel(
+	ctx: ExtensionContext,
+	agentName: string,
+	requested: string | undefined,
+	signal: AbortSignal | undefined,
+): Promise<ModelChoice> {
+	const query = requested?.trim();
+	if (!query) {
+		return { fellBack: false };
+	}
+
+	const candidates = candidateModels(ctx);
+	const resolved = resolveModel(candidates, query);
+	if (resolved.ok) {
+		return { model: resolved.model, fellBack: false };
+	}
+
+	if (resolved.reason === "unknown") {
+		throw new Error(
+			`Unknown model "${query}". Available models: ` +
+				`${resolved.available.join(", ")}.`,
+		);
+	}
+
+	// Ambiguous. Ask, when there is someone to ask: blocking on a dialog in a
+	// headless or print-mode run would hang it with nothing on screen.
+	if (!ctx.hasUI) {
+		throw new Error(
+			`Model "${query}" matches more than one available model: ` +
+				`${resolved.available.join(", ")}. Name one of them exactly.`,
+		);
+	}
+
+	const picked = await ctx.ui.select(
+		`Which model should the "${agentName}" subagent use?`,
+		resolved.available,
+		{ signal },
+	);
+	if (picked === undefined) {
+		return { fellBack: true };
+	}
+
+	return {
+		model: candidates.find((model) => modelLabel(model) === picked),
+		fellBack: false,
+	};
 }
 
 /**
@@ -95,8 +195,18 @@ function describeOutcome(
 	agentName: string,
 	outcome: SubagentOutcome,
 	unknownTools: string[],
+	choice: ModelChoice,
 ): string {
 	const parts: string[] = [];
+
+	if (choice.fellBack) {
+		// Dismissing the dialog leaves the parent's model in play. Saying so keeps
+		// that from being an invisible decision.
+		parts.push(
+			"No model was chosen for this subagent, so it ran on the current " +
+				"model.",
+		);
+	}
 
 	if (unknownTools.length > 0) {
 		parts.push(
@@ -144,6 +254,19 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 			description: Type.String({
 				description: "3-5 words describing the task, shown in the UI.",
 			}),
+			model: Type.Optional(
+				Type.String({
+					description:
+						"Model for this subagent. Partial names work (e.g. 'flash'). " +
+						"Defaults to the current model.",
+				}),
+			),
+			thinking: Type.Optional(
+				Type.String({
+					enum: [...THINKING_LEVELS],
+					description: "Effort level. Defaults to the current level.",
+				}),
+			),
 		}),
 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -178,14 +301,23 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 				deps.getKnownTools(),
 			);
 
+			// Resolved before the run starts, so an unusable model name refuses
+			// the call instead of failing partway into a session.
+			const choice = await chooseModel(
+				ctx,
+				config.name,
+				params.model ?? config.model,
+				signal,
+			);
+
 			const outcome = await deps.run({
 				ctx,
-				// The agent's own model is a name, and resolving a name to a model
-				// arrives with `resolveModel` in Slice 2. Effort needs no
-				// resolution, so it is honoured now.
 				config: { ...config, tools },
 				prompt: params.prompt,
-				thinkingLevel: config.thinking,
+				model: choice.model,
+				// The caller's choice wins; the agent file's applies otherwise;
+				// naming neither inherits the parent's.
+				thinkingLevel: (params.thinking as ThinkingLevel) ?? config.thinking,
 				signal,
 			});
 
@@ -193,7 +325,7 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 				content: [
 					{
 						type: "text" as const,
-						text: describeOutcome(config.name, outcome, unknownTools),
+						text: describeOutcome(config.name, outcome, unknownTools, choice),
 					},
 				],
 				details: {

@@ -8,7 +8,8 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Api, Model, ThinkingLevel } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,

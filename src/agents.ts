@@ -20,7 +20,7 @@ import {
 	statSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import type { ThinkingLevel } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	CONFIG_DIR_NAME,
 	getAgentDir,
@@ -60,6 +60,9 @@ type AgentFrontmatter = {
 };
 
 const THINKING_LEVELS: readonly ThinkingLevel[] = [
+	// "off" included: pi accepts it, and its own `--thinking` flag offers it.
+	// A bare `off` in YAML is boolean false, so an agent file must quote it.
+	"off",
 	"minimal",
 	"low",
 	"medium",

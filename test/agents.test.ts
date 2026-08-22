@@ -213,20 +213,52 @@ describe("discoverAgents frontmatter fields", () => {
 	});
 
 	it("accepts every thinking level Pi defines", () => {
-		for (const level of ["minimal", "low", "medium", "high", "xhigh", "max"]) {
+		// Including "off", which pi's own `--thinking` flag accepts.
+		for (const level of [
+			"off",
+			"minimal",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]) {
 			writeAgent(
 				projectAgentDir,
 				`${level}.md`,
-				`---\nname: ${level}\ndescription: d\nthinking: ${level}\n---\nb\n`,
+				`---\nname: ${level}\ndescription: d\nthinking: "${level}"\n---\nb\n`,
 			);
 		}
 
 		const agents = discoverAgents(projectRoot);
 
-		expect(agents).toHaveLength(6);
+		expect(agents).toHaveLength(7);
 		for (const found of agents) {
 			expect(found.thinking).toBe(found.name);
 		}
+	});
+
+	it("reads an unquoted `thinking: off` as the string it looks like", () => {
+		// Pi parses with yaml 2.x, which follows YAML 1.2: only `true` and
+		// `false` are booleans. The YAML 1.1 habit of reading off/on/yes/no as
+		// booleans does not apply, so no quoting is needed.
+		writeAgent(
+			projectAgentDir,
+			"bare.md",
+			"---\nname: bare\ndescription: d\nthinking: off\n---\nb\n",
+		);
+
+		expect(discoverAgents(projectRoot)[0]?.thinking).toBe("off");
+	});
+
+	it("drops a thinking level given as a real YAML boolean", () => {
+		writeAgent(
+			projectAgentDir,
+			"boolish.md",
+			"---\nname: boolish\ndescription: d\nthinking: false\n---\nb\n",
+		);
+
+		expect(discoverAgents(projectRoot)[0]?.thinking).toBeUndefined();
 	});
 
 	it("drops a thinking level Pi does not define rather than passing it through", () => {
