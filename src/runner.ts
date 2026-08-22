@@ -8,6 +8,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { existsSync } from "node:fs";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
@@ -71,14 +72,32 @@ export interface RunSubagentOptions {
 	signal?: AbortSignal;
 	createSession?: SessionFactory;
 	/**
-	 * Handed the child's session once it exists and before it is prompted.
+	 * A transcript to carry on from, instead of starting a new one.
+	 *
+	 * A path that is no longer there is treated as no path at all — see
+	 * `buildSessionManager` for why that is not the same as trusting pi.
+	 */
+	resumeFrom?: string;
+	/**
+	 * Where a new transcript is written. Omitted means pi's own default,
+	 * `~/.pi/agent/sessions/<encoded-cwd>/`, which is what production wants.
+	 *
+	 * Present so a test can point transcripts at a temporary directory:
+	 * `getDefaultSessionDir` is not exported from the package root, so there is
+	 * no way to compute the default and then redirect it.
+	 */
+	sessionDir?: string;
+	/**
+	 * Handed the child's session once it exists and before it is prompted, along
+	 * with the file its transcript is being written to.
 	 *
 	 * The runner builds the session, prompts it and disposes it, so without this
-	 * nothing outside can reach it. Context tracking needs it from the first turn,
-	 * and Slice 6's steering will need it for the life of the run. Called inside
-	 * the crash guard: a callback that throws costs this run, not the host.
+	 * nothing outside can reach it. Context tracking needs it from the first
+	 * turn, steering needs it for the life of the run, and the session file is
+	 * what lets the record reopen the conversation afterwards. Called inside the
+	 * crash guard: a callback that throws costs this run, not the host.
 	 */
-	onSession?: (session: AgentSession) => void;
+	onSession?: (session: AgentSession, sessionFile: string | undefined) => void;
 }
 
 export interface SubagentOutcome {
@@ -250,6 +269,40 @@ function buildLoader(cwd: string, config: AgentConfig): DefaultResourceLoader {
 }
 
 /**
+ * The transcript this run writes to: the stored one, or a new one.
+ *
+ * A subagent gets a file of its own rather than the in-memory session it used
+ * to have, so a finished conversation survives to be continued. `parentSession`
+ * nests it under whoever spawned it in pi's own `/resume` picker instead of
+ * leaving it loose among the user's real sessions.
+ *
+ * A parent running in memory has no file to be nested under, and its
+ * `undefined` is passed straight through: pi leaves the key out of the header
+ * rather than recording a dangling parent, so guarding it here would be a
+ * branch with nothing behind it. A test pins that behaviour, since this now
+ * depends on it.
+ *
+ * **A stored path that no longer exists is not reopened.**
+ * `SessionManager.open` does not object to a missing file — `loadEntriesFromFile`
+ * returns nothing for one and `_setSessionFile` then quietly starts a new
+ * session at that path. Resuming a transcript the user has deleted would
+ * therefore look like it had continued something when it had not. Checking
+ * first is what turns that into an honest fresh start.
+ */
+function buildSessionManager(
+	ctx: ExtensionContext,
+	opts: RunSubagentOptions,
+): SessionManager {
+	if (opts.resumeFrom && existsSync(opts.resumeFrom)) {
+		return SessionManager.open(opts.resumeFrom, opts.sessionDir);
+	}
+
+	return SessionManager.create(ctx.cwd, opts.sessionDir, {
+		parentSession: ctx.sessionManager?.getSessionFile(),
+	});
+}
+
+/**
  * Run a subagent, containing every failure.
  *
  * This is the boundary that makes running subagents in the host process safe:
@@ -288,6 +341,10 @@ async function runSubagentUnguarded(
 	const loader = buildLoader(ctx.cwd, config);
 	await loader.reload();
 
+	// Built before the session, so its file is known even if session creation
+	// fails, and so `onSession` can report the path alongside the session.
+	const sessionManager = buildSessionManager(ctx, opts);
+
 	const { session } = await createSession({
 		cwd: ctx.cwd,
 		agentDir: getAgentDir(),
@@ -295,13 +352,11 @@ async function runSubagentUnguarded(
 		thinkingLevel: opts.thinkingLevel ?? ctx.thinkingLevel,
 		tools: config.tools,
 		resourceLoader: loader,
-		// The child's transcript stays in memory: a subagent must not write over
-		// the session file the parent is using.
-		sessionManager: SessionManager.inMemory(ctx.cwd),
+		sessionManager,
 		settingsManager: SettingsManager.create(ctx.cwd, getAgentDir()),
 	});
 
-	opts.onSession?.(session);
+	opts.onSession?.(session, sessionManager.getSessionFile());
 
 	// `PromptOptions` carries no abort signal, so stopping the child means
 	// calling `abort()` on it when the caller's signal fires. The rejection

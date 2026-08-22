@@ -1,5 +1,5 @@
 /**
- * Starting a subagent, and announcing it when it ends.
+ * Starting a subagent, continuing one, and announcing it when it ends.
  *
  * Spawning is not a question the caller waits for an answer to. The tool hands
  * back an id straight away and the subagent works on in the background; when it
@@ -11,6 +11,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type {
@@ -63,12 +64,11 @@ export type RunSubagentFn = (
 	opts: RunSubagentOptions,
 ) => Promise<SubagentOutcome>;
 
-export interface StartSubagentOptions {
+/** What starting a subagent and continuing one both need. */
+export interface SubagentRunOptions {
 	ctx: ExtensionContext;
 	config: AgentConfig;
 	prompt: string;
-	/** The caller's few words about the task, shown in the list. */
-	description: string;
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	registry: SubagentRegistry;
@@ -76,10 +76,42 @@ export interface StartSubagentOptions {
 	queue: SubagentQueue;
 	sendMessage: SendMessage;
 	run?: RunSubagentFn;
+	/** Where transcripts are written. Omitted means pi's own default. */
+	sessionDir?: string;
+}
+
+export interface StartSubagentOptions extends SubagentRunOptions {
+	/** The caller's few words about the task, shown in the list. */
+	description: string;
 	/** Seams for a deterministic test. */
 	newId?: () => string;
 	now?: () => number;
 }
+
+export interface ResumeSubagentOptions extends SubagentRunOptions {
+	/**
+	 * The finished subagent to continue. Its record is reused rather than
+	 * replaced, so the list shows one subagent picking its work back up.
+	 *
+	 * `config` is the caller's freshly resolved definition, which is what makes a
+	 * continuation run under the agent type's current frontmatter rather than the
+	 * one in force when it first ran.
+	 */
+	record: SubagentRecord;
+}
+
+/** Either the continuation is under way, or here is why it is not. */
+export type ResumeResult =
+	| {
+			ok: true;
+			record: SubagentRecord;
+			/**
+			 * True when the stored transcript was gone and this is starting over
+			 * rather than continuing. The caller is expected to say so.
+			 */
+			startedFresh: boolean;
+	  }
+	| { ok: false; reason: string };
 
 /**
  * The notice the main model reads when a subagent finishes.
@@ -146,8 +178,9 @@ function turnLimit(config: AgentConfig): TurnLimit {
  */
 async function runAndAnnounce(
 	record: SubagentRecord,
-	opts: StartSubagentOptions,
+	opts: SubagentRunOptions,
 	run: RunSubagentFn,
+	resumeFrom?: string,
 ): Promise<void> {
 	const { registry, sendMessage } = opts;
 	// Everything watching the child session, torn down together when it ends.
@@ -160,17 +193,19 @@ async function runAndAnnounce(
 			prompt: opts.prompt,
 			model: opts.model,
 			thinkingLevel: opts.thinkingLevel,
+			sessionDir: opts.sessionDir,
+			resumeFrom,
 			// Deliberately no signal. The tool call that started this subagent is
 			// over the moment it returned an id, and its signal aborts with it —
 			// handing that signal down would kill every subagent at birth. Stopping
 			// one on purpose is Slice 6's job.
-			onSession: (session) => {
+			onSession: (session, sessionFile) => {
 				// Guarded on its own. This runs inside the runner's crash guard, so a
 				// throw here would come back as a failed subagent — the watchers
 				// breaking the very work they exist to watch. A run nobody can report
 				// the context use of is still a run worth finishing.
 				try {
-					registry.update(record.id, { session });
+					registry.update(record.id, { session, sessionFile });
 					stopWatching.push(
 						trackContextUsage(session, registry, record.id),
 						watchTurns(session, registry, record.id, turnLimit(opts.config)),
@@ -258,6 +293,51 @@ export function startSubagent(opts: StartSubagentOptions): SubagentRecord {
 	});
 
 	return record;
+}
+
+/**
+ * Continue a finished subagent's conversation.
+ *
+ * Detached and queued exactly as a first run is, so the two behave alike: the
+ * record goes back to work and its new answer arrives in the conversation on its
+ * own. A continuation takes a real slot, or a session already at its limit could
+ * be pushed past it by resuming finished subagents.
+ *
+ * The stored transcript is checked before it is trusted. Pi does not write a
+ * session file until the child's first assistant reply, so a subagent that
+ * failed before answering names a file that was never created — and the user may
+ * simply have deleted it. Either way this reports a fresh start rather than
+ * pretending to have continued something.
+ */
+export function resumeSubagent(opts: ResumeSubagentOptions): ResumeResult {
+	const { record, registry, queue, run = runSubagent } = opts;
+
+	if (record.status === "running" || record.status === "queued") {
+		// Two runs on one record would race: the second would overwrite the
+		// first's status and outcome. Redirecting a live subagent is steering.
+		return { ok: false, reason: "it is still working" };
+	}
+
+	const stored = record.sessionFile;
+	const resumeFrom = stored && existsSync(stored) ? stored : undefined;
+
+	registry.update(record.id, {
+		status: "queued",
+		// Cleared, or the record reads as finished while it runs again and
+		// `get_subagent_result` hands the old answer back as this run's.
+		outcome: undefined,
+		stoppedBecause: undefined,
+		// The new run's turn watcher counts from zero, so the old total would only
+		// sit here until the first turn overwrote it.
+		turns: 0,
+	});
+
+	queue.submit(record.id, () => {
+		registry.update(record.id, { status: "running" });
+		return runAndAnnounce(record, opts, run, resumeFrom);
+	});
+
+	return { ok: true, record, startedFresh: resumeFrom === undefined };
 }
 
 const STATUS_MARK: Record<SubagentStatus, string> = {

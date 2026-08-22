@@ -12,6 +12,9 @@
  * or asks `get_subagent_result` for it.
  */
 
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
 	CreateAgentSessionOptions,
 	CreateAgentSessionResult,
@@ -46,11 +49,16 @@ function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	};
 }
 
+/** The transcript the user's own session is writing to. */
+const PARENT_SESSION_FILE = "/tmp/pi-subagents-parent-session.jsonl";
+
 function parentContext(): ExtensionContext {
 	return {
 		cwd: process.cwd(),
 		model: PARENT_MODEL,
 		thinkingLevel: "high",
+		// The runner reads this to nest each subagent under whoever spawned it.
+		sessionManager: { getSessionFile: () => PARENT_SESSION_FILE },
 	} as unknown as ExtensionContext;
 }
 
@@ -140,9 +148,13 @@ function toolOverRealRunner(options: {
 	const registry = new SubagentRegistry();
 	const queue = new SubagentQueue(options.limit ?? 5);
 	const handedOut = [...(options.ids ?? [])];
+	// Subagent transcripts are persisted now, so every run needs somewhere
+	// disposable to write. Without this the suite creates the user's real
+	// ~/.pi/agent/sessions directory and writes into it.
+	const sessionDir = mkdtempSync(join(tmpdir(), "pi-subagents-boundary-"));
 	const tool = createSpawnTool({
 		discover: () => options.agents ?? [agentConfig()],
-		run: (opts) => runSubagent({ ...opts, createSession }),
+		run: (opts) => runSubagent({ ...opts, sessionDir, createSession }),
 		getKnownTools: () => ["read", "bash", "edit", "write"],
 		registry,
 		queue,
@@ -166,6 +178,7 @@ function toolOverRealRunner(options: {
 		delivered,
 		steer,
 		abort,
+		sessionDir,
 	};
 }
 
@@ -572,15 +585,42 @@ describe("Feature: Containing a subagent failure", () => {
 	});
 
 	it("keeps the child's transcript out of the parent's session", async () => {
+		const { tool, factoryCalls, delivered, sessionDir } = toolOverRealRunner(
+			{},
+		);
+
+		await tool.execute("call-1", ARGS, undefined, undefined, ctx);
+		await delivered;
+
+		// The child is given a session file of its own — Slice 7 persists these so
+		// a finished conversation can be continued — and specifically not the
+		// parent's, so nothing it said can land in the user's own transcript.
+		const manager = factoryCalls[0]?.sessionManager;
+		expect(manager?.getSessionFile()).toContain(sessionDir);
+		expect(manager?.getSessionFile()).not.toBe(PARENT_SESSION_FILE);
+	});
+
+	it("nests the child under the session that spawned it", async () => {
 		const { tool, factoryCalls, delivered } = toolOverRealRunner({});
 
 		await tool.execute("call-1", ARGS, undefined, undefined, ctx);
 		await delivered;
 
-		// The child was given its own in-memory manager rather than the
-		// parent's, so nothing it said can land in the parent's session file.
-		const manager = factoryCalls[0]?.sessionManager;
-		expect(manager).toBeDefined();
-		expect(manager?.getSessionFile()).toBeUndefined();
+		expect(factoryCalls[0]?.sessionManager?.getHeader()?.parentSession).toBe(
+			PARENT_SESSION_FILE,
+		);
+	});
+
+	// The path is what a later continuation reopens, so it has to reach the
+	// record rather than staying inside the runner.
+	it("records where the child's transcript went", async () => {
+		const { tool, registry, factoryCalls, delivered } = toolOverRealRunner({});
+
+		await tool.execute("call-1", ARGS, undefined, undefined, ctx);
+		await delivered;
+
+		expect(registry.get("sub-1")?.sessionFile).toBe(
+			factoryCalls[0]?.sessionManager?.getSessionFile(),
+		);
 	});
 });

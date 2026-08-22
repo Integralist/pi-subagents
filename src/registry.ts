@@ -42,6 +42,17 @@ export interface SubagentRecord {
 	startedAt: number;
 	/** Absent until the run actually starts, and while queued. */
 	session?: AgentSession;
+	/**
+	 * Where this subagent's transcript is written, so the conversation can be
+	 * continued after it finishes.
+	 *
+	 * Absent while queued, and absent for a subagent whose session pi never
+	 * persisted. The path existing is not a promise that the file does: pi
+	 * withholds writing until the child's first assistant reply, so a subagent
+	 * that failed before answering names a file that was never created. Anything
+	 * reopening this must check.
+	 */
+	sessionFile?: string;
 	/** Absent until the run ends. */
 	outcome?: SubagentOutcome;
 	/**

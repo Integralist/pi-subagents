@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
 	AgentSessionEvent,
 	ExtensionContext,
@@ -6,11 +9,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agents.ts";
 import { PALETTE } from "../src/colors.ts";
 import { SubagentQueue } from "../src/queue.ts";
-import { SubagentRegistry } from "../src/registry.ts";
+import { type SubagentRecord, SubagentRegistry } from "../src/registry.ts";
 import type { RunSubagentOptions, SubagentOutcome } from "../src/runner.ts";
 import {
 	COMPLETE_MESSAGE_TYPE,
+	type RunSubagentFn,
 	renderCompletion,
+	resumeSubagent,
 	type SendMessage,
 	type SubagentCompleteDetails,
 	startSubagent,
@@ -441,7 +446,7 @@ describe("startSubagent turn limits", () => {
 	/** A run that hands its session over and then never finishes. */
 	function runWith(stub: ReturnType<typeof stubSession>) {
 		return vi.fn((opts: RunSubagentOptions) => {
-			opts.onSession?.(stub.session as never);
+			opts.onSession?.(stub.session as never, "/tmp/sessions/abc123.jsonl");
 			return new Promise<SubagentOutcome>(() => {});
 		});
 	}
@@ -462,6 +467,17 @@ describe("startSubagent turn limits", () => {
 		});
 		return registry;
 	}
+
+	// The path is how a finished conversation is found again, and only the runner
+	// knows it.
+	it("records where the subagent's transcript is being written", () => {
+		const stub = stubSession();
+		const registry = launch(agentConfig(), stub);
+
+		expect(registry.get("abc123")?.sessionFile).toBe(
+			"/tmp/sessions/abc123.jsonl",
+		);
+	});
 
 	it("counts the subagent's turns onto its record", () => {
 		const stub = stubSession();
@@ -578,7 +594,7 @@ describe("startSubagent context tracking", () => {
 		const stub = stubSession();
 		const tracking = stubRun();
 		tracking.run.mockImplementation((opts: RunSubagentOptions) => {
-			opts.onSession?.(stub.session as never);
+			opts.onSession?.(stub.session as never, undefined);
 			return new Promise<SubagentOutcome>(() => {});
 		});
 
@@ -603,7 +619,7 @@ describe("startSubagent context tracking", () => {
 		const stub = stubSession();
 		const tracking = stubRun();
 		tracking.run.mockImplementation((opts: RunSubagentOptions) => {
-			opts.onSession?.(stub.session as never);
+			opts.onSession?.(stub.session as never, undefined);
 			return new Promise<SubagentOutcome>(() => {});
 		});
 
@@ -631,7 +647,7 @@ describe("startSubagent context tracking", () => {
 		const untrackable = {} as never;
 		const gate = deferred<SubagentOutcome>();
 		const runner = vi.fn((opts: RunSubagentOptions) => {
-			opts.onSession?.(untrackable);
+			opts.onSession?.(untrackable, undefined);
 			return gate.promise;
 		});
 
@@ -660,7 +676,7 @@ describe("startSubagent context tracking", () => {
 		const stub = stubSession();
 		const gate = deferred<SubagentOutcome>();
 		const tracking = vi.fn((opts: RunSubagentOptions) => {
-			opts.onSession?.(stub.session as never);
+			opts.onSession?.(stub.session as never, undefined);
 			return gate.promise;
 		});
 
@@ -750,5 +766,213 @@ describe("renderCompletion", () => {
 		expect(
 			renderCompletion(completionMessage(undefined), {} as never, plainTheme),
 		).toBeUndefined();
+	});
+});
+
+describe("resumeSubagent", () => {
+	/** A finished subagent, with a transcript at `sessionFile` if given one. */
+	function finished(sessionFile?: string): {
+		registry: SubagentRegistry;
+		record: SubagentRecord;
+	} {
+		const registry = new SubagentRegistry();
+		const record: SubagentRecord = {
+			id: "abc123",
+			handle: "reviewer",
+			type: "reviewer",
+			description: "review agents file",
+			status: "completed",
+			color: "cyan",
+			startedAt: 1_000,
+			contextPercent: 12,
+			turns: 7,
+			outcome: { status: "completed", output: "the earlier answer" },
+			sessionFile,
+		};
+		registry.add(record);
+		return { registry, record };
+	}
+
+	/** A file that really is on disk, so `existsSync` says so. */
+	function storedTranscript(): string {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-resume-"));
+		const file = join(dir, "abc123.jsonl");
+		writeFileSync(file, '{"type":"session","id":"abc123"}\n');
+		return file;
+	}
+
+	function resume(
+		registry: SubagentRegistry,
+		record: SubagentRecord,
+		overrides: {
+			config?: AgentConfig;
+			run?: RunSubagentFn;
+			queue?: SubagentQueue;
+		} = {},
+	) {
+		return resumeSubagent({
+			ctx,
+			record,
+			config: overrides.config ?? agentConfig(),
+			prompt: "and what about runner.ts?",
+			registry,
+			queue: overrides.queue ?? new SubagentQueue(5),
+			sendMessage: send.sendMessage as unknown as SendMessage,
+			run: overrides.run ?? stubRun().run,
+		});
+	}
+
+	// The specification's scenario, quoted: it continues its earlier
+	// conversation.
+	it("Continues a stored conversation", () => {
+		const file = storedTranscript();
+		const { registry, record } = finished(file);
+		const run = stubRun();
+
+		const result = resume(registry, record, { run: run.run });
+
+		expect(result.ok && result.startedFresh).toBe(false);
+		expect(run.calls[0]?.resumeFrom).toBe(file);
+	});
+
+	/**
+	 * The spec calls this out: a transcript the user has deleted must be reported
+	 * and started over, not failed silently. It is not a rare case — pi withholds
+	 * the file until the child's first assistant reply, so a subagent that failed
+	 * before answering names a file that never existed.
+	 */
+	it("starts fresh when the stored transcript is gone", () => {
+		const { registry, record } = finished(
+			"/tmp/pi-subagents-never-written.jsonl",
+		);
+		const run = stubRun();
+
+		const result = resume(registry, record, { run: run.run });
+
+		expect(result.ok && result.startedFresh).toBe(true);
+		expect(run.calls[0]?.resumeFrom).toBeUndefined();
+	});
+
+	it("starts fresh when the subagent never had a transcript at all", () => {
+		const { registry, record } = finished(undefined);
+		const run = stubRun();
+
+		const result = resume(registry, record, { run: run.run });
+
+		expect(result.ok && result.startedFresh).toBe(true);
+		expect(run.calls[0]?.resumeFrom).toBeUndefined();
+	});
+
+	it("puts the same record back to work rather than making a second one", () => {
+		const { registry, record } = finished(storedTranscript());
+
+		const result = resume(registry, record);
+
+		expect(result.ok && result.record).toBe(record);
+		expect(registry.list()).toHaveLength(1);
+		expect(registry.get("abc123")?.status).toBe("running");
+	});
+
+	/**
+	 * Left in place, the previous outcome would make the record read as finished
+	 * while it is running again, and `get_subagent_result` would hand back the
+	 * old answer as though it were this run's.
+	 */
+	it("clears the previous answer", () => {
+		const { registry, record } = finished(storedTranscript());
+
+		resume(registry, record);
+
+		expect(registry.get("abc123")?.outcome).toBeUndefined();
+	});
+
+	it("clears why it stopped last time", () => {
+		const { registry, record } = finished(storedTranscript());
+		registry.update("abc123", {
+			status: "stopped",
+			stoppedBecause: "you asked it to stop",
+		});
+
+		resume(registry, record);
+
+		expect(registry.get("abc123")?.stoppedBecause).toBeUndefined();
+	});
+
+	// The new run's turn watcher counts from zero, so the old total would only
+	// sit on the record until the first turn overwrote it.
+	it("resets the turn count for the new run", () => {
+		const { registry, record } = finished(storedTranscript());
+
+		resume(registry, record);
+
+		expect(registry.get("abc123")?.turns).toBe(0);
+	});
+
+	/**
+	 * The plan's point: a continuation runs under the type's current frontmatter,
+	 * not the one in force at first run. The caller re-resolves the definition and
+	 * this must pass that one through rather than anything remembered.
+	 */
+	it("runs under the definition it is given, not the original", () => {
+		const { registry, record } = finished(storedTranscript());
+		const run = stubRun();
+		const rewritten = agentConfig({
+			systemPrompt: "You review code very differently now.",
+			maxTurns: 4,
+		});
+
+		resume(registry, record, { config: rewritten, run: run.run });
+
+		expect(run.calls[0]?.config.systemPrompt).toBe(
+			"You review code very differently now.",
+		);
+		expect(run.calls[0]?.config.maxTurns).toBe(4);
+	});
+
+	it("announces the continuation's answer when it finishes", async () => {
+		const { registry, record } = finished(storedTranscript());
+		const run = stubRun();
+
+		resume(registry, record, { run: run.run });
+		run.finish({ status: "completed", output: "runner.ts runs one subagent" });
+		await send.delivered;
+
+		expect(registry.get("abc123")?.status).toBe("completed");
+		expect(send.sendMessage.mock.calls[0]?.[0].content).toContain(
+			"runner.ts runs one subagent",
+		);
+	});
+
+	// A continuation is a real run and takes a real slot, or a session at its
+	// limit could be pushed past it by resuming finished subagents.
+	it("waits its turn like any other run", () => {
+		const { registry, record } = finished(storedTranscript());
+		const queue = new SubagentQueue(1);
+		queue.submit("already-running", () => new Promise<void>(() => {}));
+		const run = stubRun();
+
+		const result = resume(registry, record, { queue, run: run.run });
+
+		expect(result.ok && result.record.status).toBe("queued");
+		expect(run.run).not.toHaveBeenCalled();
+	});
+
+	/**
+	 * Resuming something already under way would put two runs on one record,
+	 * with the second overwriting the first's status and outcome. Redirecting a
+	 * running subagent is what steering is for.
+	 */
+	it("refuses a subagent that has not finished", () => {
+		for (const status of ["running", "queued"] as const) {
+			const { registry, record } = finished(storedTranscript());
+			registry.update("abc123", { status });
+			const run = stubRun();
+
+			const result = resume(registry, record, { run: run.run });
+
+			expect(result.ok, status).toBe(false);
+			expect(result.ok ? "" : result.reason, status).toMatch(/still/i);
+			expect(run.run, status).not.toHaveBeenCalled();
+		}
 	});
 });

@@ -314,6 +314,12 @@ That has a direct consequence for how the work is handed out.
   > `existsSync` (`dist/core/resource-loader.js:16-30`), so an agent
   > whose body happened to look like a path would silently load that
   > file. The override's return value is used verbatim.
+  >
+  > **`SessionManager.inMemory` was replaced in Slice 7.** The child now
+  > gets a persistent session file of its own, so a finished conversation
+  > survives to be continued. The requirement this line was protecting —
+  > a subagent must not write over the parent's transcript — still holds;
+  > it is met by a separate file rather than by no file. See Task 7.1.
 
   Two caveats from Notes & Caveats did **not** bite at 0.84.2:
   `DefaultResourceLoader`'s option shape matches the plan, and the
@@ -1191,7 +1197,7 @@ That has a direct consequence for how the work is handed out.
 - **Execution**: **Main thread.** `SessionManager` persistence options are
   version-sensitive; verify against the installed Pi before committing.
 
-- [ ] **Task 7.1**: Persist instead of running in memory.
+- [x] **Task 7.1**: Persist instead of running in memory.
 
   Replace `SessionManager.inMemory(cwd)` from Task 1.4 with:
 
@@ -1204,7 +1210,49 @@ That has a direct consequence for how the work is handed out.
   `parentSession` nests the subagent under its spawner in Pi's own
   `/resume` picker. Store the resulting file path on the record.
 
-- [ ] **Task 7.2**: Implement resume.
+  > [!NOTE]
+  > **The sketch is right, and verified against the installed SDK.**
+  > `NewSessionOptions` really does carry `parentSession`
+  > (`dist/core/session-manager.d.ts`), `ExtensionContext.sessionManager`
+  > really does expose `getSessionFile(): string | undefined`, and
+  > `createAgentSession` restores a conversation by calling
+  > `sessionManager.buildSessionContext()` on whatever manager it is
+  > handed — which is what makes Task 7.2 work at all.
+  >
+  > **`sessionDir` is omitted in production.** The sketch treats it as a
+  > value to compute, but `getDefaultSessionDir` is not exported from the
+  > package root, and `SessionManager.create` already computes the same
+  > default when the argument is absent. It survives as an option on
+  > `RunSubagentOptions` purely so a test can redirect transcripts: with
+  > no override, `create` calls `mkdirSync` on the user's real
+  > `~/.pi/agent/sessions`, which every test in the suite would otherwise
+  > do. That directory is also unwritable under the agent sandbox, so the
+  > whole runner suite failed with `EPERM` until the seam existed.
+  >
+  > **`ctx.sessionManager` is typed non-optional**, so the sketch's `?.`
+  > guards nothing; it is kept only because the test fakes are casts, and
+  > those fakes now supply a session manager rather than relying on it.
+  >
+  > **A parent with no file is passed straight through as `undefined`.**
+  > The first version guarded that — `parentSession ? {...} : undefined` —
+  > and mutation testing showed the branch had no observable effect: pi
+  > omits the key from the header either way, never recording a dangling
+  > parent. The guard was removed and a test pins pi's behaviour, since
+  > the code now depends on it.
+  >
+  > **The path reaches the record through `onSession`,** which now takes
+  > `(session, sessionFile)`. The runner owns the session manager, so
+  > nothing else can know the path; widening the existing callback was
+  > cheaper than a second one, and a handler that ignores the new argument
+  > still typechecks.
+  >
+  > **Task 1.4's in-memory test inverted.** Its requirement — a subagent
+  > must not write over the parent's transcript — has not changed, but it
+  > is now met by giving the child a file of its own rather than no file
+  > at all, so the assertion moved from "has no session file" to "has one,
+  > and it is not the parent's".
+
+- [x] **Task 7.2**: Implement resume.
 
   ```typescript
   export async function resumeSubagent(
@@ -1219,6 +1267,58 @@ That has a direct consequence for how the work is handed out.
   The agent's *definition* is re-resolved at resume, so a continuation
   runs under the type's current frontmatter, not the one in force at
   first run.
+
+  > [!NOTE]
+  > **It does not return an outcome.** This signature predates Slice 3,
+  > which replaced the synchronous spawn result with a detached run and a
+  > completion notice. Awaiting a continuation would make resuming behave
+  > unlike starting, and would block the caller Slice 11 has in mind — a
+  > user typing `@explore …`, who should not be waiting on a model. So
+  > `resumeSubagent(opts)` returns at once, shaped like `ControlResult`:
+  >
+  > ```typescript
+  > type ResumeResult =
+  >   | { ok: true; record: SubagentRecord; startedFresh: boolean }
+  >   | { ok: false; reason: string };
+  > ```
+  >
+  > **`startedFresh` is how it reports a lost transcript**, and the check
+  > is not optional politeness. `SessionManager.open` does *not* object to
+  > a missing path — `loadEntriesFromFile` returns nothing and
+  > `_setSessionFile` quietly starts a new session there — so without an
+  > `existsSync` first, a resume pointed at a deleted transcript would
+  > look like it had continued something. Both the runner and
+  > `resumeSubagent` check.
+  >
+  > **This is commoner than "the user deleted it".** Pi withholds the
+  > session file until the child's *first assistant reply* (`_persist`
+  > returns early and only marks the session unflushed), so a subagent
+  > that failed before answering names a file that was never created.
+  > `SubagentRecord.sessionFile` therefore says where the transcript
+  > *would* be, not that it is there.
+  >
+  > **The record is reused, not replaced,** so the list shows one subagent
+  > picking its work back up. That means clearing `outcome` and
+  > `stoppedBecause` — left in place the record reads as finished while it
+  > runs again, and `get_subagent_result` hands the old answer back as the
+  > new run's — and resetting `turns`, which the new run's watcher counts
+  > from zero anyway. A continuation goes through the queue like any other
+  > run, or a session at its limit could be pushed past it by resuming
+  > finished subagents. A subagent that is still `running` or `queued` is
+  > refused rather than resumed: two runs on one record would race, and
+  > redirecting a live subagent is what steering is for.
+  >
+  > **It lives in `src/spawn.ts`, not a module of its own**, because it
+  > shares `runAndAnnounce` with `startSubagent` — the two now differ only
+  > in which record they use and whether they pass `resumeFrom`.
+  >
+  > **No tool calls it yet, by design.** The specification fixes the tool
+  > count at four, and Slice 11 is the named consumer (`@explore …`
+  > reaching a subagent "whatever state it is in"). Unlike Task 4.1's
+  > untested `id` parameter, this is exercised directly and in full, so it
+  > is a function waiting for its UI rather than dead weight. Slice 7 is
+  > still demoable on its own: subagent transcripts now appear in pi's
+  > `/resume` picker, nested under the session that spawned them.
 
 ### Slice 8: The subagent list
 

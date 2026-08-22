@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
@@ -78,6 +81,22 @@ function stubFactory(
 
 const PARENT_MODEL = { id: "parent-model" };
 
+/**
+ * Somewhere disposable for subagent transcripts to land.
+ *
+ * Every test that lets the runner build a session manager must pass one of
+ * these as `sessionDir`. Without it pi computes its own default and the test
+ * writes into the user's real `~/.pi/agent/sessions`.
+ */
+function tempSessionDir(): string {
+	return mkdtempSync(join(tmpdir(), "pi-subagents-sessions-"));
+}
+
+/** A parent whose session file is at `file`, or which has none (in-memory). */
+function parentSessionManager(file?: string) {
+	return { getSessionFile: () => file };
+}
+
 function fakeContext(
 	overrides: Partial<ExtensionContext> = {},
 ): ExtensionContext {
@@ -85,11 +104,15 @@ function fakeContext(
 		cwd: process.cwd(),
 		model: PARENT_MODEL,
 		thinkingLevel: "high",
+		// Pi types this non-optional, and the runner reads it to nest a subagent
+		// under whoever spawned it.
+		sessionManager: parentSessionManager("/tmp/parent-session.jsonl"),
 		...overrides,
 	} as unknown as ExtensionContext;
 }
 
 let config: AgentConfig;
+let sessionDir: string;
 
 beforeEach(() => {
 	config = {
@@ -99,14 +122,27 @@ beforeEach(() => {
 		source: "project",
 		filePath: "/tmp/reviewer.md",
 	};
+	sessionDir = tempSessionDir();
 });
+
+/**
+ * `runSubagent` with somewhere harmless to write.
+ *
+ * Every run now builds a persistent session manager, and one with no
+ * `sessionDir` creates — and `mkdirSync`s — the user's real session directory.
+ * Going through here keeps the whole suite out of `~/.pi`. A test that cares
+ * about the directory passes its own and this leaves it alone.
+ */
+function run(options: Parameters<typeof runSubagent>[0]) {
+	return runSubagent({ sessionDir, ...options });
+}
 
 describe("runSubagent", () => {
 	// The plan's acceptance criterion for Task 1.4, quoted.
 	it("given the parent runs model M at effort E, starts a subagent with neither specified using M and E", async () => {
 		const stub = stubFactory();
 
-		await runSubagent({
+		await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -122,7 +158,7 @@ describe("runSubagent", () => {
 		const stub = stubFactory();
 		const ownModel = { id: "own-model" } as never;
 
-		await runSubagent({
+		await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -140,7 +176,7 @@ describe("runSubagent", () => {
 			reply: [assistant("first answer"), assistant("final answer")],
 		});
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -167,7 +203,7 @@ describe("runSubagent", () => {
 			],
 		});
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -182,7 +218,7 @@ describe("runSubagent", () => {
 			reply: [assistant("partial", "error", "the provider refused")],
 		});
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -201,7 +237,7 @@ describe("runSubagent", () => {
 			reply: [assistant("half an answer", "aborted")],
 		});
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -215,7 +251,7 @@ describe("runSubagent", () => {
 	it("reports a run that produced no assistant reply as failed", async () => {
 		const stub = stubFactory({ reply: [] });
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -231,7 +267,7 @@ describe("runSubagent", () => {
 		const stub = stubFactory();
 		config.tools = ["read", "grep"];
 
-		await runSubagent({
+		await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -244,7 +280,7 @@ describe("runSubagent", () => {
 	it("gives the child a loader whose system prompt is the agent's own", async () => {
 		const stub = stubFactory();
 
-		await runSubagent({
+		await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -257,27 +293,78 @@ describe("runSubagent", () => {
 		expect(loader?.getAppendSystemPrompt()).toEqual([]);
 	});
 
-	it("runs the child in its own in-memory session so the parent transcript is untouched", async () => {
+	/**
+	 * Slice 7 replaced the in-memory session this test used to assert on. The
+	 * requirement it was protecting has not changed — a subagent must not write
+	 * over the parent's transcript — but it is now met by giving the child a file
+	 * of its own rather than by giving it no file at all.
+	 */
+	it("keeps the child's transcript in a file of its own, not the parent's", async () => {
 		const stub = stubFactory();
+		const sessionDir = tempSessionDir();
 
-		await runSubagent({
-			ctx: fakeContext(),
+		await run({
+			ctx: fakeContext({
+				sessionManager: parentSessionManager(
+					"/tmp/parent-session.jsonl",
+				) as unknown as ExtensionContext["sessionManager"],
+			}),
 			config,
 			prompt: "review this",
+			sessionDir,
 			createSession: stub.createSession,
 		});
 
-		// A real SessionManager, and specifically an in-memory one: a subagent
-		// must not write over the session file the parent is using.
 		const manager = stub.calls[0]?.sessionManager;
 		expect(manager).toBeInstanceOf(SessionManager);
-		expect(manager?.getSessionFile()).toBeUndefined();
+		expect(manager?.isPersisted()).toBe(true);
+		expect(manager?.getSessionFile()).not.toBe("/tmp/parent-session.jsonl");
+		expect(manager?.getSessionFile()).toContain(sessionDir);
+	});
+
+	// `parentSession` is what nests a subagent under its spawner in pi's own
+	// /resume picker, rather than leaving it loose among real sessions.
+	it("nests the child under the session that spawned it", async () => {
+		const stub = stubFactory();
+
+		await run({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			sessionDir: tempSessionDir(),
+			createSession: stub.createSession,
+		});
+
+		expect(stub.calls[0]?.sessionManager?.getHeader()?.parentSession).toBe(
+			"/tmp/parent-session.jsonl",
+		);
+	});
+
+	// A parent running in memory has no file to be nested under, and naming it
+	// as a parent anyway would write a dangling path into the child's header.
+	it("names no parent when the spawning session has no file", async () => {
+		const stub = stubFactory();
+
+		await run({
+			ctx: fakeContext({
+				sessionManager:
+					parentSessionManager() as unknown as ExtensionContext["sessionManager"],
+			}),
+			config,
+			prompt: "review this",
+			sessionDir: tempSessionDir(),
+			createSession: stub.createSession,
+		});
+
+		expect(
+			stub.calls[0]?.sessionManager?.getHeader()?.parentSession,
+		).toBeUndefined();
 	});
 
 	it("disposes the child session once the run finishes", async () => {
 		const stub = stubFactory();
 
-		await runSubagent({
+		await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -292,7 +379,7 @@ describe("runSubagent", () => {
 		stub.session.prompt.mockRejectedValueOnce(new Error("model exploded"));
 
 		// Task 1.5 requires this to be contained rather than rethrown.
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -312,7 +399,7 @@ describe("runSubagent", () => {
 			},
 		});
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -327,7 +414,7 @@ describe("runSubagent", () => {
 	it("does not start a session at all when the signal is already aborted", async () => {
 		const stub = stubFactory();
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -352,7 +439,7 @@ describe("runSubagent failure containment", () => {
 			throw new Error("no model configured");
 		});
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -369,7 +456,7 @@ describe("runSubagent failure containment", () => {
 			throw new Error("boom");
 		});
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -385,7 +472,7 @@ describe("runSubagent failure containment", () => {
 			throw "just a string";
 		});
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -402,7 +489,7 @@ describe("runSubagent failure containment", () => {
 			throw new Error("dispose exploded");
 		});
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -441,7 +528,7 @@ describe("runSubagent failure containment", () => {
 		});
 		stub.session.abort.mockReturnValue(recordingThenable);
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -535,7 +622,7 @@ describe("runSubagent recursion guard", () => {
 			return stub.createSession(opts);
 		});
 
-		await runSubagent({
+		await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -549,7 +636,7 @@ describe("runSubagent recursion guard", () => {
 	it("leaves the parent out of the child context once the run is over", async () => {
 		const stub = stubFactory();
 
-		await runSubagent({
+		await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -568,7 +655,7 @@ describe("runSubagent session handover", () => {
 		const stub = stubFactory();
 		const seen: unknown[] = [];
 
-		await runSubagent({
+		await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -588,7 +675,7 @@ describe("runSubagent session handover", () => {
 			},
 		});
 
-		await runSubagent({
+		await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -604,7 +691,7 @@ describe("runSubagent session handover", () => {
 	it("contains a handover that throws", async () => {
 		const stub = stubFactory();
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -621,7 +708,7 @@ describe("runSubagent session handover", () => {
 	it("says nothing when the caller does not ask for the session", async () => {
 		const stub = stubFactory();
 
-		const outcome = await runSubagent({
+		const outcome = await run({
 			ctx: fakeContext(),
 			config,
 			prompt: "review this",
@@ -629,6 +716,123 @@ describe("runSubagent session handover", () => {
 		});
 
 		expect(outcome.status).toBe("completed");
+	});
+
+	// The record needs the path to be able to reopen the conversation later, and
+	// only the runner knows it — it builds the session manager.
+	it("hands over the file the child's transcript is being written to", async () => {
+		const stub = stubFactory();
+		const sessionDir = tempSessionDir();
+		const seen: Array<string | undefined> = [];
+
+		await run({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			sessionDir,
+			createSession: stub.createSession,
+			onSession: (_session, sessionFile) => seen.push(sessionFile),
+		});
+
+		expect(seen).toHaveLength(1);
+		expect(seen[0]).toBe(stub.calls[0]?.sessionManager?.getSessionFile());
+		expect(seen[0]).toContain(sessionDir);
+	});
+});
+
+describe("runSubagent resuming a stored conversation", () => {
+	/**
+	 * A session file on disk with one exchange already in it.
+	 *
+	 * The assistant reply is not decoration. Pi withholds the file until an
+	 * assistant message exists — `_persist` returns early and only marks the
+	 * session unflushed — so a user message alone leaves nothing on disk and
+	 * `existsSync` would be false.
+	 */
+	function storedConversation(dir: string) {
+		const earlier = SessionManager.create(process.cwd(), dir);
+		earlier.appendMessage({
+			role: "user",
+			content: "what does agents.ts do?",
+			timestamp: Date.now(),
+		});
+		earlier.appendMessage(
+			assistant("it discovers agent files") as unknown as Parameters<
+				typeof earlier.appendMessage
+			>[0],
+		);
+		const file = earlier.getSessionFile();
+		if (!file) throw new Error("the stored session was not given a file");
+		if (!existsSync(file)) {
+			throw new Error(`the stored session was never written: ${file}`);
+		}
+		return file;
+	}
+
+	// The specification's scenario, quoted: it continues its earlier
+	// conversation, and its earlier turns are still in its context.
+	it("Continues a stored conversation", async () => {
+		const sessionDir = tempSessionDir();
+		const file = storedConversation(sessionDir);
+		const stub = stubFactory();
+
+		await run({
+			ctx: fakeContext(),
+			config,
+			prompt: "and what about runner.ts?",
+			sessionDir,
+			resumeFrom: file,
+			createSession: stub.createSession,
+		});
+
+		const manager = stub.calls[0]?.sessionManager;
+		expect(manager?.getSessionFile()).toBe(file);
+		expect(JSON.stringify(manager?.getEntries())).toContain(
+			"what does agents.ts do?",
+		);
+	});
+
+	it("appends to the stored file rather than starting a second one", async () => {
+		const sessionDir = tempSessionDir();
+		const file = storedConversation(sessionDir);
+		const stub = stubFactory();
+
+		await run({
+			ctx: fakeContext(),
+			config,
+			prompt: "and now?",
+			sessionDir,
+			resumeFrom: file,
+			createSession: stub.createSession,
+		});
+
+		expect(readdirSync(sessionDir)).toHaveLength(1);
+	});
+
+	/**
+	 * `SessionManager.open` does not object to a path that is not there — it
+	 * quietly starts an empty session at it. A resume pointed at a transcript the
+	 * user has since deleted would therefore look like it had continued something
+	 * when it had not, so the runner refuses to reopen a file that is gone and
+	 * starts a fresh session instead.
+	 */
+	it("starts a new session when the stored conversation is gone", async () => {
+		const sessionDir = tempSessionDir();
+		const missing = join(sessionDir, "deleted-since.jsonl");
+		const stub = stubFactory();
+
+		await run({
+			ctx: fakeContext(),
+			config,
+			prompt: "carry on",
+			sessionDir,
+			resumeFrom: missing,
+			createSession: stub.createSession,
+		});
+
+		const manager = stub.calls[0]?.sessionManager;
+		expect(manager?.getSessionFile()).not.toBe(missing);
+		expect(manager?.isPersisted()).toBe(true);
 	});
 });
 
