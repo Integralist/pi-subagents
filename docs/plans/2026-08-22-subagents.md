@@ -80,12 +80,12 @@ installed at
 
 - **Mode:** Stack (proposed — awaiting confirmation)
 
-| Layer | Base          | Includes      | Branch          |
-| ----- | ------------- | ------------- | --------------- |
-| 1     | `main`        | Slices 1–2    | `foundation`    |
-| 2     | `foundation`  | Slices 3–7    | `lifecycle`     |
-| 3     | `lifecycle`   | Slices 8–10   | `subagent-list` |
-| 4     | `subagent-list` | Slices 11–12 | `mentions`     |
+| Layer | Base            | Includes     | Branch          |
+| ----- | --------------- | ------------ | --------------- |
+| 1     | `main`          | Slices 1–2   | `foundation`    |
+| 2     | `foundation`    | Slices 3–7   | `lifecycle`     |
+| 3     | `lifecycle`     | Slices 8–10  | `subagent-list` |
+| 4     | `subagent-list` | Slices 11–12 | `mentions`      |
 
 Each layer builds, typechecks, and passes its own tests. Layer 1 gives
 a working single delegation; Layer 2 gives background execution and
@@ -133,11 +133,15 @@ That has a direct consequence for how the work is handed out.
 ### Slice 1: Repo scaffold and one subagent, start to finish
 
 - **Blocked by**: None — can start immediately
+
 - **Delivers**: The main agent delegates a task to a named subagent and
   receives its answer. Blocking, one at a time, no UI.
+
 - **Consumes**: None
+
 - **Produces**: `AgentConfig`, `discoverAgents()`, `runSubagent()`,
   `SubagentOutcome`, `SubagentError`, the `spawn_subagent` tool.
+
 - **Execution**: **Main thread.** Discovery work — the Pi SDK's runtime
   behaviour is read but unverified. Expect to correct this plan as reality
   lands.
@@ -509,8 +513,7 @@ That has a direct consequence for how the work is handed out.
   > [!IMPORTANT]
   > **The full-stack test found a wording defect the shallow ones could
   > not.** Both the runner and the tool named the agent, so a contained
-  > crash read `The "reviewer" subagent failed: subagent "reviewer"
-  > failed: no model configured`, while a *provider* error named it only
+  > crash read `The "reviewer" subagent failed: subagent "reviewer" failed: no model configured`, while a *provider* error named it only
   > once because the runner did not prefix that path. Fixed by one
   > invariant: **an outcome's `error` always names its agent**, built by
   > a single `failureReason` helper, and the tool reports it verbatim.
@@ -520,10 +523,14 @@ That has a direct consequence for how the work is handed out.
 ### Slice 2: Model and effort overrides with fuzzy name resolution
 
 - **Blocked by**: Slice 1 (needs `spawn_subagent` and `runSubagent`)
+
 - **Delivers**: `spawn_subagent({ model: "flash", thinking: "low" })`
   runs the child on a different model than the parent.
+
 - **Consumes**: `runSubagent(opts: RunSubagentOptions)` from Slice 1.
+
 - **Produces**: `resolveModel()`.
+
 - **Execution**: **`/tasks` candidate.** `resolveModel` is a pure function over
   `ModelRegistry.getAll()`, which is already verified. Fully mechanical.
 
@@ -611,7 +618,7 @@ That has a direct consequence for how the work is handed out.
   > **Resolved by importing `ThinkingLevel` from `pi-agent-core`** in
   > `src/agents.ts`, `src/runner.ts`, and `src/index.ts`, and adding
   > that package to `peerDependencies` (`"*"`) and `devDependencies`
-  > (`0.84.2`). Both pi surfaces this code feeds — 
+  > (`0.84.2`). Both pi surfaces this code feeds —
   > `CreateAgentSessionOptions.thinkingLevel` and
   > `ExtensionContext.thinkingLevel` — use that spelling, and pi's own
   > `--thinking` flag offers `off`, so dropping it would have lost a
@@ -666,11 +673,15 @@ That has a direct consequence for how the work is handed out.
 ### Slice 3: Background execution, registry, and completion notices
 
 - **Blocked by**: Slice 1
+
 - **Delivers**: Spawning returns immediately with an id; the subagent
   works in the background; its result arrives in the conversation when
   it finishes. `get_subagent_result` reads it back on demand.
+
 - **Consumes**: `runSubagent`, `SubagentOutcome` from Slice 1.
+
 - **Produces**: `SubagentRecord`, `SubagentRegistry`, `assignColor()`.
+
 - **Execution**: **Main thread.** Wires into Pi's message delivery and event
   stream; behaviour needs observing, not just reading.
 
@@ -740,8 +751,7 @@ That has a direct consequence for how the work is handed out.
 
   > [!NOTE]
   > **Two corrections to the sketch above, both verified against the
-  > installed SDK.** `getContextUsage()` is typed `ContextUsage |
-  > undefined`, not `ContextUsage` — so there are three separate ways the
+  > installed SDK.** `getContextUsage()` is typed `ContextUsage | undefined`, not `ContextUsage` — so there are three separate ways the
   > figure can be unknown: no usage object, a null `percent`, or a read
   > that threw. `readContextPercent` folds all three to null, because zero
   > would claim an empty context rather than an unknown one.
@@ -755,8 +765,7 @@ That has a direct consequence for how the work is handed out.
   >
   > Delivered as `trackContextUsage(session, registry, idOrHandle)`,
   > returning the session's own unsubscribe. It takes a
-  > `ContextUsageSource` — `Pick<AgentSession, "subscribe" |
-  > "getContextUsage">` — so a test supplies a stub rather than a live
+  > `ContextUsageSource` — `Pick<AgentSession, "subscribe" | "getContextUsage">` — so a test supplies a stub rather than a live
   > session. The listener runs inside the child's event dispatch, so
   > nothing in it may throw: the read is guarded, and updating a record
   > that has already gone is a no-op.
@@ -873,10 +882,14 @@ That has a direct consequence for how the work is handed out.
 ### Slice 4: Concurrency limit with queueing
 
 - **Blocked by**: Slice 3 (needs the registry and detached runs)
+
 - **Delivers**: Spawning past the limit queues rather than running;
   queued subagents start as slots free.
+
 - **Consumes**: `SubagentRegistry`, `SubagentRecord` from Slice 3.
+
 - **Produces**: `SubagentQueue`.
+
 - **Execution**: **`/tasks` candidate.** Pure queue logic, no SDK surface.
 
 - [x] **Task 4.1**: Implement the queue in `src/queue.ts`.
@@ -902,6 +915,21 @@ That has a direct consequence for how the work is handed out.
   > the caller already holds the record. An unused parameter cannot be
   > tested, which is the tell. Slice 6 should add it back at the moment
   > cancelling a *queued* subagent gives it something to identify.
+  >
+  > **Slice 6 added it back**, as `submit(id, run)` alongside
+  > `cancel(id): boolean`. Stopping a subagent that never got a slot has
+  > to reach into the waiting list, and the id is the only handle on it.
+  > The queue still knows nothing about subagents — the id is opaque to
+  > it, and what it means stays the caller's business.
+  >
+  > `cancel` frees no slot, because a waiting submission never held one;
+  > freeing one would run a subagent over the limit for every
+  > cancellation. It reports `false` both for an id it has never seen and
+  > for one already running, which is what tells `stopSubagent` to go and
+  > abort the session instead. Both are mutation-tested, as is the
+  > removal being by id rather than from the front of the queue — the
+  > first version of that test cancelled the front entry and so passed
+  > against either implementation.
   >
   > Two guarantees the sketch does not mention, both mutation-tested. A
   > limit below one is clamped to one — accepting subagents and starting
@@ -953,11 +981,15 @@ That has a direct consequence for how the work is handed out.
 ### Slice 5: Turn limits with a graceful wrap-up
 
 - **Blocked by**: Slice 3
+
 - **Delivers**: A subagent warned at its turn limit returns a usable
   answer; one that ignores the warning is stopped.
+
 - **Consumes**: `SubagentRecord`, and the `turn_end` subscription from
   Task 3.2.
+
 - **Produces**: `watchTurns` in `src/turns.ts`.
+
 - **Execution**: **`/tasks` candidate** once Slice 3 lands — turn counting
   inside an existing subscription is mechanical.
 
@@ -1001,7 +1033,7 @@ That has a direct consequence for how the work is handed out.
   Grace defaults to 3.
 
   `maxTurns` resolution order: caller parameter, then frontmatter
-  `maxTurns:`, then unlimited.
+  `maxTurns:`, then the default of 30.
 
   > [!NOTE]
   > **The frontmatter key is `maxTurns:`, not `max_turns:`.** This line
@@ -1012,9 +1044,23 @@ That has a direct consequence for how the work is handed out.
   > **The caller parameter did not exist until now.** The resolution
   > order named three levels and only two were reachable, so
   > `spawn_subagent` gained `max_turns`, following exactly the pattern
-  > `model` and `thinking` already set in Task 2.2. Unlimited-by-default
-  > is this line's own decision, and worth keeping in view: it means an
-  > agent file with no `maxTurns:` runs until it stops itself.
+  > `model` and `thinking` already set in Task 2.2.
+  >
+  > **Unlimited-by-default was replaced by a default of 30 during Slice
+  > 6**, on the user's decision. As written, this line left an agent file
+  > with no `maxTurns:` running until it stopped itself — no runaway
+  > protection at all for exactly the agents most likely to need it, and
+  > a product decision the specification never states. `DEFAULT_MAX_TURNS = 30` now lives in `src/turns.ts` beside `DEFAULT_GRACE_TURNS`, so
+  > every subagent warns at 30 and stops at 33 unless it says otherwise.
+  > Thirty sits clear of honest work while still catching a subagent that
+  > has stopped making progress; the warn-then-stop shape means one that
+  > is merely slow still gets to answer.
+  >
+  > That made `watchTurns`' `limit` parameter required rather than
+  > optional: with `turnLimit()` always returning one, the no-limit
+  > branch became unreachable and its test would have been testing dead
+  > code. The value is pinned by a test of its own, since it is a product
+  > decision rather than an implementation detail.
   >
   > "Marked incomplete" needed somewhere to live. An aborted session
   > already summarises as a `stopped` outcome, but that says only that
@@ -1029,15 +1075,19 @@ That has a direct consequence for how the work is handed out.
 ### Slice 6: Steering and stopping
 
 - **Blocked by**: Slice 3
+
 - **Delivers**: `steer_subagent` redirects a running subagent;
   `stop_subagent` halts one and keeps its partial output.
+
 - **Consumes**: `SubagentRegistry.get()`, `SubagentRecord.session`.
+
 - **Produces**: `steerSubagent()`, `stopSubagent()` — reused by the UI
   in Slice 10 and mentions in Slice 11.
+
 - **Execution**: **`/tasks` candidate** once Slice 3 lands — thin wrappers over
   `session.steer()` and `session.abort()`, both verified.
 
-- [ ] **Task 6.1**: Implement the two operations in `src/control.ts`.
+- [x] **Task 6.1**: Implement the two operations in `src/control.ts`.
 
   ```typescript
   export type ControlResult =
@@ -1049,7 +1099,7 @@ That has a direct consequence for how the work is handed out.
   ): Promise<ControlResult>;
 
   export async function stopSubagent(
-    record: SubagentRecord,
+    record: SubagentRecord, deps: ControlDeps,
   ): Promise<ControlResult>;
   ```
 
@@ -1057,18 +1107,87 @@ That has a direct consequence for how the work is handed out.
   throwing — the UI and the mention handler both need to show it.
   Separate functions from the tools, because three callers need them.
 
-- [ ] **Task 6.2**: Register `steer_subagent` and `stop_subagent`.
+  > [!NOTE]
+  > **`stopSubagent` takes a second parameter the sketch does not have**,
+  > `{ registry, queue }`. Two reasons, both load-bearing. The registry,
+  > because `SubagentRecord.stoppedBecause` has to be written and
+  > `registry.update()` is documented as the only door — mutating the
+  > record directly works and notifies nobody, leaving the Slice 8 list
+  > showing a status that has already moved on. The queue, because a
+  > subagent that never got a slot is stopped by dropping it from the
+  > queue and has no session to abort.
+  >
+  > **The two cases end differently, and the asymmetry is deliberate.** A
+  > *running* subagent gets `stoppedBecause` recorded and its session
+  > aborted, and nothing more: the run is in flight and will settle into
+  > a stopped outcome of its own, which is what sets the status and sends
+  > the notice. Setting the status here would race that, and would mark a
+  > subagent stopped that the abort had arrived too late to stop. A
+  > *queued* one has no run to settle it, so its status and a
+  > `{ status: "stopped", output: "" }` outcome are written here — without
+  > the outcome the record reads as still working and
+  > `get_subagent_result` would keep saying so for the rest of the
+  > session.
+  >
+  > **`stoppedBecause` is `"you asked it to stop"`**, reusing the field
+  > Task 5.2 introduced as that note anticipated. Worded to compose with
+  > the notice's existing "was stopped because …" sentence.
+  >
+  > **Reasons name no subagent.** They are bare clauses — "it has already
+  > finished" — because the callers name it differently: a tool by type
+  > and id, the Slice 10 list by the row the message sits under. Naming
+  > it here too would double it up in one place or the other, which is
+  > the mistake commit `d78fb0d` already had to undo once.
+  >
+  > Three cases the sketch does not mention. An empty or whitespace-only
+  > steering message is refused, since a tool argument is a system
+  > boundary and a blank steer is noise delivered to a subagent. A record
+  > is `running` from the moment it takes a slot, a fraction *before* the
+  > run has built its session, so both operations test `record.session`
+  > rather than the status — steering into that window would reach for a
+  > session that is not there. And the message is delivered exactly as
+  > written: trimming it would quietly rewrite one whose indentation was
+  > the point.
+
+- [x] **Task 6.2**: Register `steer_subagent` and `stop_subagent`.
 
   `steer_subagent`: `{ id: Type.String(), message: Type.String() }`.
   `stop_subagent`: `{ id: Type.String() }`.
 
+  > [!NOTE]
+  > **A refusal is thrown, not returned as text.** `ControlResult` exists
+  > so the *UI* can display a reason, but a tool result the model reads
+  > as success would leave it believing it had redirected a subagent that
+  > in fact finished a moment earlier. A thrown tool error is the one
+  > result it cannot misread. The functions still return rather than
+  > throw, because Slice 10 needs them to.
+  >
+  > **`AgentToolResult` requires `details`**, so these two carry a
+  > `ControlDetails` — `{ id, agent, status, description }` — rather than
+  > content alone. Read off the record *after* the operation, so a stop
+  > that dropped a queued subagent reports it as stopped rather than as
+  > it found it. Reusing `SpawnDetails` would have meant a meaningless
+  > `unknownTools: []` on every control result.
+  >
+  > **The "no subagent with id" lookup was extracted** to `requireRecord`
+  > now that three tools take an id.
+  >
+  > **No child-context guard on these two**, unlike `spawn_subagent`.
+  > That guard exists because spawning recursively forks the host process
+  > without bound; steering a sibling is merely useless, and a subagent
+  > cannot obtain an id to try it with.
+
 ### Slice 7: Session persistence and resume
 
 - **Blocked by**: Slice 3
+
 - **Delivers**: A finished subagent's conversation survives on disk and
   can be continued.
+
 - **Consumes**: `runSubagent`, `SubagentRecord`.
+
 - **Produces**: `resumeSubagent()`, `SubagentRecord.sessionFile`.
+
 - **Execution**: **Main thread.** `SessionManager` persistence options are
   version-sensitive; verify against the installed Pi before committing.
 
@@ -1104,10 +1223,14 @@ That has a direct consequence for how the work is handed out.
 ### Slice 8: The subagent list
 
 - **Blocked by**: Slice 3 (needs records with colour, status, context %)
+
 - **Delivers**: A live list below the prompt showing every subagent,
   its colour, and its context-window use, in columns past five.
+
 - **Consumes**: `SubagentRegistry.list()`, `onChange()`.
+
 - **Produces**: `SubagentList` component, `layoutColumns()`.
+
 - **Execution**: **Split.** Task 8.1 (`layoutColumns`) is a `/tasks` candidate —
   pure, with the spec's Examples table as its cases. Tasks 8.2–8.4 are main
   thread: you will want to look at the rendering and adjust it.
@@ -1143,10 +1266,14 @@ That has a direct consequence for how the work is handed out.
 ### Slice 9: Navigating the list
 
 - **Blocked by**: Slice 8
+
 - **Delivers**: Arrow keys move a selection through the list and across
   columns; escape returns to the prompt; typing is never intercepted.
+
 - **Consumes**: `SubagentList` from Slice 8.
+
 - **Produces**: Selection state and key handling on `SubagentList`.
+
 - **Execution**: **Main thread.** Key wiring you will iterate on. A sealed
   executor cannot tell you the navigation feels wrong.
 
@@ -1180,12 +1307,16 @@ That has a direct consequence for how the work is handed out.
 ### Slice 10: Opening a subagent and steering it there
 
 - **Blocked by**: Slice 9 (selection), Slice 6 (`steerSubagent`)
+
 - **Delivers**: Enter opens a live view of the selected subagent;
   typing there redirects it.
+
 - **Consumes**: `steerSubagent()` from Slice 6, selection from Slice 9.
+
 - **Produces**: `SubagentViewer` component.
+
 - **Execution**: **Main thread.** Visual and interactive; same reason as Slice
-  9.
+  9\.
 
 - [ ] **Task 10.1**: Build the viewer.
 
@@ -1202,13 +1333,32 @@ That has a direct consequence for how the work is handed out.
   The viewer must survive completion so the final output is readable —
   it closes only on escape.
 
+- [ ] **Task 10.4**: Announce a subagent the user stopped from the UI.
+
+  Left open by Slice 6, and only reachable once there is a UI to stop
+  one from. `stopSubagent` sends no completion notice: on the tool path
+  the model reads the outcome in the tool result, so none is needed.
+  Stopping a subagent from the list has no such result, which leaves the
+  main model waiting for an answer that will never arrive — it was told
+  at spawn that "its result will arrive here when it is done".
+
+  Worst for a *queued* subagent, whose run never starts and so never
+  settles; a running one at least settles into a stopped outcome that
+  `runAndAnnounce` reports. Wiring `sendMessage` into the UI's stop path
+  is the fix. Deliberately not built in Slice 6, where nothing could
+  reach it.
+
 ### Slice 11: Addressing a subagent by name
 
 - **Blocked by**: Slice 7 (resume), Slice 6 (steering)
+
 - **Delivers**: `@explore look at auth` reaches that subagent whatever
   state it is in, with no main-model turn.
+
 - **Consumes**: `steerSubagent`, `resumeSubagent`, `SubagentRegistry.get`.
+
 - **Produces**: `parseMention()`, the `input` handler.
+
 - **Execution**: **Split.** Task 11.2 (`parseMention`) is a `/tasks` candidate —
   pure, and the spec's routing table is its test cases verbatim. Tasks 11.1 and
   11.3 are main thread.
@@ -1256,10 +1406,14 @@ That has a direct consequence for how the work is handed out.
 ### Slice 12: Live model change (droppable)
 
 - **Blocked by**: Slice 6 (control functions), Slice 2 (`resolveModel`)
+
 - **Delivers**: Retargeting a running subagent's model; takes effect at
   its next turn boundary.
+
 - **Consumes**: `resolveModel()` from Slice 2, `SubagentRecord.session`.
+
 - **Produces**: Nothing later slices depend on.
+
 - **Execution**: **Main thread.** Riskiest slice, and droppable. Needs judgement
   about whether the runtime cooperates.
 
@@ -1302,30 +1456,30 @@ That has a direct consequence for how the work is handed out.
 
 ## File Changes
 
-| File                        | Change                                        |
-| --------------------------- | --------------------------------------------- |
-| `package.json`              | New — Pi manifest, peer deps, scripts         |
-| `tsconfig.json`             | New — TypeScript config                       |
-| `biome.json`                | New — lint and format config                  |
-| `vitest.config.ts`          | New — test config                             |
-| `.gitignore`                | New                                           |
-| `src/index.ts`              | New — factory, tool and event registration    |
-| `src/agents.ts`             | New — agent file discovery                    |
-| `src/runner.ts`             | New — nested session creation, crash guard    |
-| `src/registry.ts`           | New — records, status, context tracking       |
-| `src/spawn.ts`              | New — detached runs, completion notices       |
-| `src/queue.ts`              | New — concurrency limit                       |
-| `src/turns.ts`              | New — turn counting, warning, hard stop       |
-| `src/control.ts`            | New — steer and stop                          |
-| `src/model-resolver.ts`     | New — fuzzy model matching                    |
-| `src/colors.ts`             | New — palette assignment                      |
-| `src/mention.ts`            | New — `@name` parsing                         |
-| `src/ui/layout.ts`          | New — column splitting                        |
-| `src/ui/subagent-list.ts`   | New — the list and its key handling           |
-| `src/ui/viewer.ts`          | New — live conversation view                  |
-| `test/*.test.ts`            | New — one file per seam plus unit tests       |
-| `agents/*.md`               | New — example agent definitions               |
-| `README.md`, `CONTEXT.md`   | New                                           |
+| File                      | Change                                     |
+| ------------------------- | ------------------------------------------ |
+| `package.json`            | New — Pi manifest, peer deps, scripts      |
+| `tsconfig.json`           | New — TypeScript config                    |
+| `biome.json`              | New — lint and format config               |
+| `vitest.config.ts`        | New — test config                          |
+| `.gitignore`              | New                                        |
+| `src/index.ts`            | New — factory, tool and event registration |
+| `src/agents.ts`           | New — agent file discovery                 |
+| `src/runner.ts`           | New — nested session creation, crash guard |
+| `src/registry.ts`         | New — records, status, context tracking    |
+| `src/spawn.ts`            | New — detached runs, completion notices    |
+| `src/queue.ts`            | New — concurrency limit                    |
+| `src/turns.ts`            | New — turn counting, warning, hard stop    |
+| `src/control.ts`          | New — steer and stop                       |
+| `src/model-resolver.ts`   | New — fuzzy model matching                 |
+| `src/colors.ts`           | New — palette assignment                   |
+| `src/mention.ts`          | New — `@name` parsing                      |
+| `src/ui/layout.ts`        | New — column splitting                     |
+| `src/ui/subagent-list.ts` | New — the list and its key handling        |
+| `src/ui/viewer.ts`        | New — live conversation view               |
+| `test/*.test.ts`          | New — one file per seam plus unit tests    |
+| `agents/*.md`             | New — example agent definitions            |
+| `README.md`, `CONTEXT.md` | New                                        |
 
 ## Parallel Execution
 
@@ -1347,10 +1501,10 @@ and adjust as it appears — that belongs in the main thread.
 One genuine fan-out exists. After Slice 3 lands, four slices touch
 disjoint files and share no unresolved blocker:
 
-| Subagent Role                          | Slices  |
-| -------------------------------------- | ------- |
-| Concurrency and turn limits            | 4, 5    |
-| Lifecycle control and persistence      | 6, 7    |
+| Subagent Role                     | Slices |
+| --------------------------------- | ------ |
+| Concurrency and turn limits       | 4, 5   |
+| Lifecycle control and persistence | 6, 7   |
 
 Both are well-specified, file-disjoint, and unlikely to need steering.
 Everything else runs in the main thread.

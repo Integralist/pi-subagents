@@ -2,11 +2,14 @@
  * pi-subagents — delegate work to focused subagents that run as nested
  * in-process sessions.
  *
- * Registers two tools. `spawn_subagent` takes the name of an agent defined
- * under `.pi/agents/` and a task for it, and returns an id straight away —
- * the subagent then works in the background and its answer arrives in the
+ * Registers four tools, all of which speak in the id that `spawn_subagent`
+ * returns. `spawn_subagent` takes the name of an agent defined under
+ * `.pi/agents/` and a task for it, and returns that id straight away — the
+ * subagent then works in the background and its answer arrives in the
  * conversation on its own. `get_subagent_result` reads that answer back on
  * demand, for a caller that would rather ask than wait to be told.
+ * `steer_subagent` redirects one mid-run, and `stop_subagent` halts one while
+ * keeping whatever it had worked out.
  */
 
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -20,6 +23,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { type AgentConfig, discoverAgents } from "./agents.ts";
+import { steerSubagent, stopSubagent } from "./control.ts";
 import { modelLabel, resolveModel } from "./model-resolver.ts";
 import { resolveConcurrencyLimit, SubagentQueue } from "./queue.ts";
 import { type SubagentRecord, SubagentRegistry } from "./registry.ts";
@@ -32,9 +36,12 @@ import {
 	type SendMessage,
 	startSubagent,
 } from "./spawn.ts";
+import { DEFAULT_MAX_TURNS } from "./turns.ts";
 
 export const SPAWN_TOOL_NAME = "spawn_subagent";
 export const RESULT_TOOL_NAME = "get_subagent_result";
+export const STEER_TOOL_NAME = "steer_subagent";
+export const STOP_TOOL_NAME = "stop_subagent";
 
 /**
  * Every effort level pi accepts, `off` included. A plain string `enum` rather
@@ -292,7 +299,7 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 					minimum: 1,
 					description:
 						"Turns before the subagent is told to wrap up. Defaults to " +
-						"whatever its agent file sets, or no limit.",
+						`whatever its agent file sets, or ${DEFAULT_MAX_TURNS}.`,
 				}),
 			),
 		}),
@@ -384,6 +391,55 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 }
 
 /**
+ * The record for an id the model supplied, or a refusal that says what it could
+ * have asked for instead.
+ *
+ * Three tools take an id, and a model that has lost track of one is better off
+ * with the live ids than with a bare "not found".
+ */
+function requireRecord(registry: SubagentRegistry, id: string): SubagentRecord {
+	const record = registry.get(id);
+	if (record) {
+		return record;
+	}
+
+	const known = registry.list();
+	throw new Error(
+		`No subagent with id "${id}". ` +
+			(known.length > 0
+				? `Known ids: ${known.map((r) => r.id).join(", ")}.`
+				: "No subagents have been started in this session."),
+	);
+}
+
+/** Names a subagent the way a tool result should: type and id together. */
+function nameOf(record: SubagentRecord): string {
+	return `subagent "${record.type}" (${record.id})`;
+}
+
+/**
+ * What a steer or a stop reports back, for logs and for the list.
+ *
+ * Read off the record after the operation, so a stop that dropped a queued
+ * subagent reports it as stopped rather than as it was a moment before.
+ */
+export interface ControlDetails {
+	id: string;
+	agent: string;
+	status: SubagentRecord["status"];
+	description: string;
+}
+
+function controlDetails(record: SubagentRecord): ControlDetails {
+	return {
+		id: record.id,
+		agent: record.type,
+		status: record.status,
+		description: record.description,
+	};
+}
+
+/**
  * Reading a subagent's answer back on demand.
  *
  * The answer arrives on its own when the subagent finishes, so this exists for
@@ -406,16 +462,7 @@ export function createResultTool(deps: { registry: SubagentRegistry }) {
 		}),
 
 		async execute(_toolCallId, params) {
-			const record = deps.registry.get(params.id);
-			if (!record) {
-				const known = deps.registry.list();
-				throw new Error(
-					`No subagent with id "${params.id}". ` +
-						(known.length > 0
-							? `Known ids: ${known.map((r) => r.id).join(", ")}.`
-							: "No subagents have been started in this session."),
-				);
-			}
+			const record = requireRecord(deps.registry, params.id);
 
 			const text = record.outcome
 				? describeCompletion(record, record.outcome)
@@ -431,6 +478,104 @@ export function createResultTool(deps: { registry: SubagentRegistry }) {
 					description: record.description,
 					unknownTools: [],
 				} satisfies SpawnDetails,
+			};
+		},
+	});
+}
+
+/**
+ * Redirecting a subagent that is already working.
+ *
+ * A refusal is thrown rather than returned as text. The model must not be left
+ * believing it has redirected a subagent that in fact finished a moment before
+ * the message arrived, and a tool error is the one result it cannot read as
+ * success.
+ */
+export function createSteerTool(deps: { registry: SubagentRegistry }) {
+	return defineTool({
+		name: STEER_TOOL_NAME,
+		label: "Steer Subagent",
+		description:
+			`Redirect a running subagent, by the id ${SPAWN_TOOL_NAME} returned. ` +
+			"The message lands after the subagent's current turn and before its " +
+			"next model call, so it changes what the subagent does next rather " +
+			"than starting it over. A subagent that has already finished cannot " +
+			"be steered.",
+		parameters: Type.Object({
+			id: Type.String({
+				description: `The id ${SPAWN_TOOL_NAME} returned.`,
+			}),
+			message: Type.String({
+				description:
+					"The new instruction. The subagent cannot see this conversation, " +
+					"so the message must be self-contained.",
+			}),
+		}),
+
+		async execute(_toolCallId, params) {
+			const record = requireRecord(deps.registry, params.id);
+			const result = await steerSubagent(record, params.message);
+			if (!result.ok) {
+				throw new Error(`Cannot steer ${nameOf(record)}: ${result.reason}.`);
+			}
+
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text:
+							`Steered ${nameOf(record)}. It carries on from that message; ` +
+							"its result will arrive here when it finishes.",
+					},
+				],
+				details: controlDetails(record),
+			};
+		},
+	});
+}
+
+/**
+ * Halting a subagent, whether it is running or still waiting for a slot.
+ *
+ * The queue is needed as well as the registry: a subagent that never got a slot
+ * is stopped by dropping it from the queue, and there is no session to abort.
+ */
+export function createStopTool(deps: {
+	registry: SubagentRegistry;
+	queue: SubagentQueue;
+}) {
+	return defineTool({
+		name: STOP_TOOL_NAME,
+		label: "Stop Subagent",
+		description:
+			`Halt a subagent, by the id ${SPAWN_TOOL_NAME} returned. Whatever it ` +
+			`had worked out is kept, and ${RESULT_TOOL_NAME} will return it, ` +
+			"marked as incomplete. A subagent that has not started yet is " +
+			"dropped before it does. Use this for work that is no longer wanted " +
+			"— a subagent that is merely slow will finish on its own.",
+		parameters: Type.Object({
+			id: Type.String({
+				description: `The id ${SPAWN_TOOL_NAME} returned.`,
+			}),
+		}),
+
+		async execute(_toolCallId, params) {
+			const record = requireRecord(deps.registry, params.id);
+			const result = await stopSubagent(record, deps);
+			if (!result.ok) {
+				throw new Error(`Cannot stop ${nameOf(record)}: ${result.reason}.`);
+			}
+
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text:
+							`Stopped ${nameOf(record)}. Anything it had worked out is ` +
+							`kept — call ${RESULT_TOOL_NAME} with its id to read it.`,
+					},
+				],
+				details: controlDetails(record),
 			};
 		},
 	});
@@ -482,5 +627,7 @@ export default function (pi: ExtensionAPI): void {
 	);
 
 	pi.registerTool(createResultTool({ registry }));
+	pi.registerTool(createSteerTool({ registry }));
+	pi.registerTool(createStopTool({ registry, queue }));
 	pi.registerMessageRenderer(COMPLETE_MESSAGE_TYPE, renderCompletion);
 }

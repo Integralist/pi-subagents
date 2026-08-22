@@ -4,15 +4,21 @@
  * Subagents share the host process and the user's rate limit, so ten launched
  * together is worse than ten launched five at a time: they contend, and the
  * screen fills with work nobody is reading. The queue is FIFO and knows nothing
- * about subagents — it hands out slots to thunks, and the caller decides what a
- * slot is for.
+ * about subagents — it hands out slots to thunks under an opaque id, and the
+ * caller decides what a slot is for and what the id means.
  */
 
 type Run = () => Promise<void>;
 
+/** A submission that has not been given a slot yet. */
+interface Waiting {
+	id: string;
+	run: Run;
+}
+
 export class SubagentQueue {
 	readonly #limit: number;
-	readonly #waiting: Run[] = [];
+	readonly #waiting: Waiting[] = [];
 	#running = 0;
 
 	/**
@@ -34,10 +40,34 @@ export class SubagentQueue {
 	 *
 	 * Returns immediately either way. The caller finds out which happened by
 	 * whether its thunk has been called, not from here.
+	 *
+	 * The id is the queue's only handle on a submission, and exists so a caller
+	 * can `cancel` one it has changed its mind about.
 	 */
-	submit(run: Run): void {
-		this.#waiting.push(run);
+	submit(id: string, run: Run): void {
+		this.#waiting.push({ id, run });
 		this.#pump();
+	}
+
+	/**
+	 * Drop a submission that has not started, reporting whether there was one.
+	 *
+	 * `false` covers both an id that never existed and one whose run is already
+	 * under way — the queue cannot reach into a run it has already started, and
+	 * a caller reading `false` knows to stop the work itself instead.
+	 *
+	 * No slot is freed, because a waiting submission never held one. Freeing one
+	 * here would let the queue run a subagent over its limit for every
+	 * cancellation.
+	 */
+	cancel(id: string): boolean {
+		const index = this.#waiting.findIndex((entry) => entry.id === id);
+		if (index === -1) {
+			return false;
+		}
+
+		this.#waiting.splice(index, 1);
+		return true;
 	}
 
 	/** Fill every free slot from the front of the queue. */
@@ -48,7 +78,7 @@ export class SubagentQueue {
 				return;
 			}
 			this.#running += 1;
-			void this.#settle(next);
+			void this.#settle(next.run);
 		}
 	}
 

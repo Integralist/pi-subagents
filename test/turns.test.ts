@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { type SubagentRecord, SubagentRegistry } from "../src/registry.ts";
 import {
 	DEFAULT_GRACE_TURNS,
+	DEFAULT_MAX_TURNS,
+	type TurnLimit,
 	type TurnLimitSession,
 	WRAP_UP_MESSAGE,
 	watchTurns,
@@ -72,10 +74,13 @@ beforeEach(() => {
 	registry.add(record("abc123"));
 });
 
+/** A limit set far enough out that it never bites during a test. */
+const ROOMY: TurnLimit = { maxTurns: 1_000 };
+
 describe("watchTurns", () => {
 	it("counts each turn onto the record", () => {
 		const stub = stubSession();
-		watchTurns(stub.session, registry, "abc123");
+		watchTurns(stub.session, registry, "abc123", ROOMY);
 
 		stub.endTurn(3);
 
@@ -84,7 +89,7 @@ describe("watchTurns", () => {
 
 	it("counts nothing for events that are not a turn ending", () => {
 		const stub = stubSession();
-		watchTurns(stub.session, registry, "abc123");
+		watchTurns(stub.session, registry, "abc123", ROOMY);
 
 		stub.emit({ type: "turn_start" } as unknown as AgentSessionEvent);
 
@@ -94,30 +99,28 @@ describe("watchTurns", () => {
 	it("hands back the session's own unsubscribe", () => {
 		const stub = stubSession();
 
-		watchTurns(stub.session, registry, "abc123")();
+		watchTurns(stub.session, registry, "abc123", ROOMY)();
 
 		expect(stub.unsubscribe).toHaveBeenCalledTimes(1);
 	});
 
 	it("does nothing for a subagent that is no longer registered", () => {
 		const stub = stubSession();
-		watchTurns(stub.session, new SubagentRegistry(), "vanished");
+		watchTurns(stub.session, new SubagentRegistry(), "vanished", ROOMY);
 
 		expect(() => stub.endTurn()).not.toThrow();
 	});
 
-	describe("with no limit set", () => {
-		it("still counts, and never interrupts", async () => {
-			const stub = stubSession();
-			watchTurns(stub.session, registry, "abc123");
+	it("leaves a subagent well short of its limit alone", async () => {
+		const stub = stubSession();
+		watchTurns(stub.session, registry, "abc123", { maxTurns: 50 });
 
-			stub.endTurn(50);
-			await settled();
+		stub.endTurn(49);
+		await settled();
 
-			expect(registry.get("abc123")?.turns).toBe(50);
-			expect(stub.steer).not.toHaveBeenCalled();
-			expect(stub.abort).not.toHaveBeenCalled();
-		});
+		expect(registry.get("abc123")?.turns).toBe(49);
+		expect(stub.steer).not.toHaveBeenCalled();
+		expect(stub.abort).not.toHaveBeenCalled();
 	});
 
 	describe("at the turn limit", () => {
@@ -306,6 +309,31 @@ describe("watchTurns", () => {
 			} finally {
 				process.off("unhandledRejection", seen);
 			}
+		});
+	});
+
+	/**
+	 * The default is a product decision rather than an implementation detail, so
+	 * it is pinned here: changing it should mean changing this line deliberately,
+	 * not discovering later that subagents are being cut off sooner.
+	 */
+	describe("the default limit", () => {
+		it("warns at thirty turns and stops three after that", async () => {
+			expect(DEFAULT_MAX_TURNS).toBe(30);
+
+			const stub = stubSession();
+			watchTurns(stub.session, registry, "abc123", {
+				maxTurns: DEFAULT_MAX_TURNS,
+			});
+
+			stub.endTurn(DEFAULT_MAX_TURNS);
+			await settled();
+			expect(stub.steer).toHaveBeenCalledTimes(1);
+			expect(stub.abort).not.toHaveBeenCalled();
+
+			stub.endTurn(DEFAULT_GRACE_TURNS);
+			await settled();
+			expect(stub.abort).toHaveBeenCalledTimes(1);
 		});
 	});
 });

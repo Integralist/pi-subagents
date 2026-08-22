@@ -34,7 +34,7 @@ import {
 	runSubagent,
 	type SubagentOutcome,
 } from "./runner.ts";
-import { type TurnLimit, watchTurns } from "./turns.ts";
+import { DEFAULT_MAX_TURNS, type TurnLimit, watchTurns } from "./turns.ts";
 
 /** Marks the completion notice, for the renderer and for anything filtering. */
 export const COMPLETE_MESSAGE_TYPE = "subagent-complete";
@@ -124,14 +124,15 @@ export function describeCompletion(
 }
 
 /**
- * The turn limit for this agent, if its file sets one.
+ * The turn limit for this agent — its own, or the default.
  *
- * An agent file with no `maxTurns:` gets no limit at all — neither the
- * specification nor the plan names a default, and inventing one would cut
- * short every agent written before there was a limit to write down.
+ * Every subagent gets one. An agent file naming no `maxTurns:` would otherwise
+ * have no runaway protection whatsoever, which is the case the protection
+ * exists for; the warn-then-stop shape means a subagent that is simply taking
+ * its time still gets to answer rather than being cut off.
  */
-function turnLimit(config: AgentConfig): TurnLimit | undefined {
-	return config.maxTurns ? { maxTurns: config.maxTurns } : undefined;
+function turnLimit(config: AgentConfig): TurnLimit {
+	return { maxTurns: config.maxTurns ?? DEFAULT_MAX_TURNS };
 }
 
 /**
@@ -251,7 +252,7 @@ export function startSubagent(opts: StartSubagentOptions): SubagentRecord {
 	};
 
 	registry.add(record);
-	queue.submit(() => {
+	queue.submit(record.id, () => {
 		registry.update(record.id, { status: "running" });
 		return runAndAnnounce(record, opts, run);
 	});

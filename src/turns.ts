@@ -18,6 +18,17 @@ import type { SubagentRegistry } from "./registry.ts";
 export const DEFAULT_GRACE_TURNS = 3;
 
 /**
+ * The limit a subagent whose agent file names none is held to.
+ *
+ * Thirty is chosen to sit well clear of honest work — a subagent reading a few
+ * files and reporting back takes a handful of turns, and a wide search a couple
+ * of dozen — while still catching one that has stopped making progress. Every
+ * subagent gets a limit: an agent file written before there was a `maxTurns:`
+ * to write down is exactly the one most likely to run away.
+ */
+export const DEFAULT_MAX_TURNS = 30;
+
+/**
  * What a subagent is told when it reaches its limit.
  *
  * Steering is delivered after the current turn's tool calls and before the next
@@ -61,9 +72,12 @@ function attempt(action: () => Promise<void>): void {
 }
 
 /**
- * Count a subagent's turns, and hold it to its limit if it has one.
+ * Count a subagent's turns, and hold it to its limit.
  *
  * Returns the session's unsubscribe function.
+ *
+ * Every subagent has a limit — the caller supplies the default for one whose
+ * agent file names none — so there is no unlimited path here to get wrong.
  *
  * Warning and stopping each happen exactly once. Without the guards a subagent
  * past its limit would be steered on every subsequent turn, which is both
@@ -73,7 +87,7 @@ export function watchTurns(
 	session: TurnLimitSession,
 	registry: SubagentRegistry,
 	idOrHandle: string,
-	limit?: TurnLimit,
+	limit: TurnLimit,
 ): () => void {
 	let turns = 0;
 	let warned = false;
@@ -86,10 +100,6 @@ export function watchTurns(
 
 		turns += 1;
 		registry.update(idOrHandle, { turns });
-
-		if (!limit) {
-			return;
-		}
 
 		const graceTurns = limit.graceTurns ?? DEFAULT_GRACE_TURNS;
 

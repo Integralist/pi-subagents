@@ -19,9 +19,13 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agents.ts";
+import { STOPPED_BY_USER } from "../src/control.ts";
 import {
+	type ControlDetails,
 	createResultTool,
 	createSpawnTool,
+	createSteerTool,
+	createStopTool,
 	type SpawnDetails,
 } from "../src/index.ts";
 import { SubagentQueue } from "../src/queue.ts";
@@ -79,9 +83,22 @@ function toolOverRealRunner(options: {
 	reply?: unknown[];
 	failWith?: Error;
 	id?: string;
+	/** Ids handed out in order, for a test that needs more than one subagent. */
+	ids?: string[];
 	limit?: number;
+	/**
+	 * Leave the child's `prompt` unresolved, so the subagent stays running for a
+	 * test that wants to steer or stop it. Such a test must not await
+	 * `delivered`: nothing will ever settle the run.
+	 */
+	hangPrompt?: boolean;
 }) {
 	const factoryCalls: CreateAgentSessionOptions[] = [];
+
+	// Hoisted out of the factory so a test can assert on what the child was
+	// asked to do after the tool call that asked it has returned.
+	const steer = vi.fn(async (_text: string) => {});
+	const abort = vi.fn(async () => {});
 
 	const createSession = vi.fn(
 		async (
@@ -94,8 +111,11 @@ function toolOverRealRunner(options: {
 			return {
 				session: {
 					messages: options.reply ?? [assistant("looks fine")],
-					prompt: vi.fn(async () => {}),
-					abort: vi.fn(async () => {}),
+					prompt: options.hangPrompt
+						? vi.fn(() => new Promise<void>(() => {}))
+						: vi.fn(async () => {}),
+					steer,
+					abort,
 					dispose: vi.fn(),
 					// Context tracking subscribes to the child the moment it exists.
 					subscribe: vi.fn(() => vi.fn()),
@@ -119,6 +139,7 @@ function toolOverRealRunner(options: {
 
 	const registry = new SubagentRegistry();
 	const queue = new SubagentQueue(options.limit ?? 5);
+	const handedOut = [...(options.ids ?? [])];
 	const tool = createSpawnTool({
 		discover: () => options.agents ?? [agentConfig()],
 		run: (opts) => runSubagent({ ...opts, createSession }),
@@ -126,19 +147,25 @@ function toolOverRealRunner(options: {
 		registry,
 		queue,
 		sendMessage: sendMessage as unknown as SendMessage,
-		newId: () => options.id ?? "sub-1",
+		newId: () => handedOut.shift() ?? options.id ?? "sub-1",
 	});
 	const resultTool = createResultTool({ registry });
+	const steerTool = createSteerTool({ registry });
+	const stopTool = createStopTool({ registry, queue });
 
 	return {
 		tool,
 		resultTool,
+		steerTool,
+		stopTool,
 		factoryCalls,
 		createSession,
 		registry,
 		queue,
 		sendMessage,
 		delivered,
+		steer,
+		abort,
 	};
 }
 
@@ -265,6 +292,204 @@ describe("Feature: Reading a subagent result back", () => {
 		await expect(
 			resultTool.execute("call-1", { id: "nope" }, undefined, undefined, ctx),
 		).rejects.toThrow(/no subagent with id/i);
+	});
+});
+
+describe("Feature: Steering, stopping, and collecting", () => {
+	/** Spawn one subagent and leave it running, so it can be steered. */
+	async function running(
+		options: Parameters<typeof toolOverRealRunner>[0] = {},
+	) {
+		const harness = toolOverRealRunner({ ...options, hangPrompt: true });
+		await harness.tool.execute("call-1", ARGS, undefined, undefined, ctx);
+		// The run is detached, so the child session exists a tick after the tool
+		// call returned. Steering before then has nothing to reach.
+		await new Promise((resolve) => setImmediate(resolve));
+		return harness;
+	}
+
+	// The specification's scenario, quoted.
+	it("Redirects a running subagent", async () => {
+		const { steerTool, steer } = await running();
+
+		const result = await steerTool.execute(
+			"call-2",
+			{ id: "sub-1", message: "check the tests too" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		// The message appears in that subagent's conversation.
+		expect(steer).toHaveBeenCalledWith("check the tests too");
+		// And the subagent continues from that message.
+		expect(resultText(result)).toMatch(/carries on/i);
+	});
+
+	// The specification's scenario, quoted.
+	it("Refuses to steer a finished subagent", async () => {
+		const { tool, steerTool, steer, delivered } = toolOverRealRunner({});
+
+		await tool.execute("call-1", ARGS, undefined, undefined, ctx);
+		await delivered;
+
+		await expect(
+			steerTool.execute(
+				"call-2",
+				{ id: "sub-1", message: "one more thing" },
+				undefined,
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow(/already finished/i);
+		expect(steer).not.toHaveBeenCalled();
+	});
+
+	// The specification's scenario, quoted.
+	it("Halts a running subagent", async () => {
+		const { stopTool, abort, registry } = await running();
+
+		const result = await stopTool.execute(
+			"call-2",
+			{ id: "sub-1" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(abort).toHaveBeenCalledTimes(1);
+		expect(registry.get("sub-1")?.stoppedBecause).toBe(STOPPED_BY_USER);
+		// And its partial output is available.
+		expect(resultText(result)).toMatch(/kept/i);
+	});
+
+	/**
+	 * The mirror of refusing to steer one. A stop that quietly succeeded would
+	 * leave the model believing it had halted work that in fact already finished
+	 * and reported an answer.
+	 */
+	it("refuses to stop a subagent that has already finished", async () => {
+		const { tool, stopTool, abort, delivered } = toolOverRealRunner({});
+
+		await tool.execute("call-1", ARGS, undefined, undefined, ctx);
+		await delivered;
+
+		await expect(
+			stopTool.execute("call-2", { id: "sub-1" }, undefined, undefined, ctx),
+		).rejects.toThrow(/already finished/i);
+		expect(abort).not.toHaveBeenCalled();
+	});
+
+	it("refuses to steer or stop an id it has never issued", async () => {
+		const { steerTool, stopTool } = toolOverRealRunner({});
+
+		await expect(
+			steerTool.execute(
+				"call-1",
+				{ id: "nope", message: "hello" },
+				undefined,
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow(/no subagent with id/i);
+		await expect(
+			stopTool.execute("call-2", { id: "nope" }, undefined, undefined, ctx),
+		).rejects.toThrow(/no subagent with id/i);
+	});
+
+	describe("stopping a subagent that never got a slot", () => {
+		/** One subagent holding the only slot, and a second queued behind it. */
+		async function queued() {
+			const harness = toolOverRealRunner({
+				limit: 1,
+				ids: ["sub-1", "sub-2"],
+				hangPrompt: true,
+			});
+			await harness.tool.execute("call-1", ARGS, undefined, undefined, ctx);
+			await harness.tool.execute("call-2", ARGS, undefined, undefined, ctx);
+			await new Promise((resolve) => setImmediate(resolve));
+			return harness;
+		}
+
+		it("marks it stopped without ever starting it", async () => {
+			const { stopTool, registry, createSession } = await queued();
+			expect(registry.get("sub-2")?.status).toBe("queued");
+			const sessionsBefore = createSession.mock.calls.length;
+
+			await stopTool.execute(
+				"call-3",
+				{ id: "sub-2" },
+				undefined,
+				undefined,
+				ctx,
+			);
+			await new Promise((resolve) => setImmediate(resolve));
+
+			expect(registry.get("sub-2")?.status).toBe("stopped");
+			// No session was ever built for it, so it never spent a token.
+			expect(createSession.mock.calls).toHaveLength(sessionsBefore);
+		});
+
+		/**
+		 * The details are read off the record after the operation, so they report
+		 * what the stop actually did rather than the state it found.
+		 */
+		it("reports the dropped subagent as stopped in its details", async () => {
+			const { stopTool } = await queued();
+
+			const result = await stopTool.execute(
+				"call-3",
+				{ id: "sub-2" },
+				undefined,
+				undefined,
+				ctx,
+			);
+
+			expect((result.details as ControlDetails).status).toBe("stopped");
+		});
+
+		it("leaves the subagent holding the slot alone", async () => {
+			const { stopTool, registry, abort } = await queued();
+
+			await stopTool.execute(
+				"call-3",
+				{ id: "sub-2" },
+				undefined,
+				undefined,
+				ctx,
+			);
+
+			expect(registry.get("sub-1")?.status).toBe("running");
+			expect(abort).not.toHaveBeenCalled();
+		});
+
+		/**
+		 * Nothing will ever settle a subagent that never ran, so the record has to
+		 * carry an outcome or `get_subagent_result` would report it as still
+		 * working for the rest of the session.
+		 */
+		it("reports it as stopped rather than still working", async () => {
+			const { stopTool, resultTool } = await queued();
+
+			await stopTool.execute(
+				"call-3",
+				{ id: "sub-2" },
+				undefined,
+				undefined,
+				ctx,
+			);
+			const result = await resultTool.execute(
+				"call-4",
+				{ id: "sub-2" },
+				undefined,
+				undefined,
+				ctx,
+			);
+
+			expect(resultText(result)).not.toMatch(/still working/i);
+			expect(resultText(result)).toMatch(/stopped/i);
+			expect(resultText(result)).toMatch(/incomplete/i);
+		});
 	});
 });
 

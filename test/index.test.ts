@@ -15,6 +15,8 @@ import extension, {
 	createSpawnTool,
 	RESULT_TOOL_NAME,
 	SPAWN_TOOL_NAME,
+	STEER_TOOL_NAME,
+	STOP_TOOL_NAME,
 } from "../src/index.ts";
 import { DEFAULT_CONCURRENCY, SubagentQueue } from "../src/queue.ts";
 import { SubagentRegistry } from "../src/registry.ts";
@@ -222,6 +224,33 @@ describe("extension registration", () => {
 	it("registers the tool that reads a result back", () => {
 		expect(register().registered.map((t) => t.name)).toContain(
 			RESULT_TOOL_NAME,
+		);
+	});
+
+	it("registers the tool that redirects a running subagent", () => {
+		expect(register().registered.map((t) => t.name)).toContain(STEER_TOOL_NAME);
+	});
+
+	it("registers the tool that halts a subagent", () => {
+		expect(register().registered.map((t) => t.name)).toContain(STOP_TOOL_NAME);
+	});
+
+	/**
+	 * The specification's decision, quoted: four tools are registered. A fifth
+	 * would mean something was registered twice, which pi accepts silently.
+	 */
+	it("registers exactly the four tools and no more", () => {
+		expect(
+			register()
+				.registered.map((t) => t.name)
+				.sort(),
+		).toEqual(
+			[
+				RESULT_TOOL_NAME,
+				SPAWN_TOOL_NAME,
+				STEER_TOOL_NAME,
+				STOP_TOOL_NAME,
+			].sort(),
 		);
 	});
 
@@ -479,7 +508,13 @@ describe("spawn_subagent turn limit", () => {
 		expect(run.mock.calls[0]?.[0].config.maxTurns).toBe(4);
 	});
 
-	it("leaves a subagent unlimited when neither names one", async () => {
+	/**
+	 * Neither the caller nor the agent file naming a limit leaves the config's
+	 * own field unset — the default is applied further in, when the run's turn
+	 * watcher is built, so nothing here invents a limit the caller did not ask
+	 * for. `spawn.test.ts` covers the default actually biting.
+	 */
+	it("names no limit on the config when neither names one", async () => {
 		const { tool, run } = harness({ hang: true });
 
 		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);

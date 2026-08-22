@@ -109,7 +109,7 @@ export class SubagentError extends Error {
  * throw a string, or `undefined`, and that must still produce a usable message
  * rather than "[object Object]".
  */
-function describeCause(cause: unknown): string {
+export function describeCause(cause: unknown): string {
 	if (cause instanceof Error) {
 		return cause.message;
 	}

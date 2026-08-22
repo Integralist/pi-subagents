@@ -15,6 +15,7 @@ import {
 	type SubagentCompleteDetails,
 	startSubagent,
 } from "../src/spawn.ts";
+import { DEFAULT_MAX_TURNS, WRAP_UP_MESSAGE } from "../src/turns.ts";
 
 function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	return {
@@ -492,17 +493,44 @@ describe("startSubagent turn limits", () => {
 		expect(registry.get("abc123")?.stoppedBecause).toMatch(/turn limit/i);
 	});
 
-	// No `maxTurns:` in the agent file means no limit at all.
-	it("lets an agent file with no limit run on", async () => {
+	/**
+	 * An agent file naming no limit still gets one. Without this an agent
+	 * written before there was a limit to write down would have no runaway
+	 * protection at all, which is the one case the protection is for.
+	 */
+	it("falls back to the default limit when the agent file sets none", async () => {
+		const stub = stubSession();
+		launch(agentConfig(), stub);
+
+		stub.endTurn(DEFAULT_MAX_TURNS);
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(stub.steer).toHaveBeenCalledWith(WRAP_UP_MESSAGE);
+	});
+
+	it("leaves a subagent alone right up to the default limit", async () => {
 		const stub = stubSession();
 		const registry = launch(agentConfig(), stub);
 
-		stub.endTurn(40);
+		stub.endTurn(DEFAULT_MAX_TURNS - 1);
 		await new Promise((resolve) => setImmediate(resolve));
 
 		expect(stub.steer).not.toHaveBeenCalled();
 		expect(stub.abort).not.toHaveBeenCalled();
-		expect(registry.get("abc123")?.turns).toBe(40);
+		expect(registry.get("abc123")?.turns).toBe(DEFAULT_MAX_TURNS - 1);
+	});
+
+	// The agent file's own limit must still win over the default, or setting
+	// `maxTurns:` would do nothing.
+	it("prefers the agent file's limit to the default", async () => {
+		const stub = stubSession();
+		launch(agentConfig({ maxTurns: 2 }), stub);
+
+		stub.endTurn(2);
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(stub.steer).toHaveBeenCalledTimes(1);
+		expect(DEFAULT_MAX_TURNS).toBeGreaterThan(2);
 	});
 });
 
