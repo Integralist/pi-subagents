@@ -218,7 +218,7 @@ That has a direct consequence for how the work is handed out.
   only exists once the extension holds an `ExtensionAPI` — and
   hardcoding the built-ins here would rot on every Pi upgrade.
 
-- [ ] **Task 1.4**: Implement `runSubagent()` in `src/runner.ts`.
+- [x] **Task 1.4**: Implement `runSubagent()` in `src/runner.ts`.
 
   ```typescript
   import { createAgentSession, DefaultResourceLoader, SessionManager,
@@ -280,6 +280,43 @@ That has a direct consequence for how the work is handed out.
   Given the parent runs model M at effort E, when a subagent starts
   with neither specified, then the child session is created with M
   and E.
+
+  Everything above verified against 0.84.2. Four corrections landed
+  with the implementation:
+
+  - **`signal` cannot be passed through.** `PromptOptions` has no
+    abort field, so the caller's signal is wired to `session.abort()`
+    via an `abort` listener instead, and an already-aborted signal
+    returns before any session is built.
+  - **The last assistant message must be found by hand.**
+    `_findLastAssistantMessage` is private; the public `session.messages`
+    is walked backwards instead. Only `type: "text"` blocks contribute
+    to the output, so thinking and tool calls stay out of it.
+  - **`stopReason` decides the status**, rather than assuming success.
+    `"aborted"` maps to `stopped` and `"error"` to `failed`, carrying
+    the model's own `errorMessage` back. A run with no assistant reply
+    at all is `failed`, not an empty success.
+  - **`session.dispose()` must be called** in a `finally`, or the child
+    keeps its agent-event listeners attached.
+
+  > [!NOTE]
+  > **`systemPromptOverride` is the right choice, not just a valid
+  > one.** The loader also accepts a plain `systemPrompt: string`, but
+  > that value is treated as a prompt *source* and passed to
+  > `existsSync` (`dist/core/resource-loader.js:16-30`), so an agent
+  > whose body happened to look like a path would silently load that
+  > file. The override's return value is used verbatim.
+
+  Two caveats from Notes & Caveats did **not** bite at 0.84.2:
+  `DefaultResourceLoader`'s option shape matches the plan, and the
+  `Model<any>` in `pi-ai` and `pi-ai/compat` are mutually assignable,
+  so `createAgentSession`'s model plumbing needs no workaround. Written
+  as `Model<Api>` to satisfy Biome's `noExplicitAny` without a
+  suppression.
+
+  Added to the signature: `createSession?: SessionFactory`, the
+  "stubbed session factory" the specification names as its primary
+  testing seam.
 
 - [ ] **Task 1.5**: Wrap every run so no subagent failure escapes.
 
