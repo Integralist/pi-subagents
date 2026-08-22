@@ -410,7 +410,7 @@ That has a direct consequence for how the work is handed out.
   > controls and read the flag while it is genuinely mid-flight. Only
   > that ordering distinguishes `AsyncLocalStorage` from a global.
 
-- [ ] **Task 1.7**: Register `spawn_subagent` in `src/index.ts`.
+- [x] **Task 1.7**: Register `spawn_subagent` in `src/index.ts`.
 
   ```typescript
   import { Type } from "typebox";
@@ -432,6 +432,54 @@ That has a direct consequence for how the work is handed out.
 
   Plain types and explicit enums only — no `anyOf` or conditional
   schema constructs, per the spec's provider-compatibility decision.
+
+  Both `typebox` and `@earendil-works/pi-ai` export **the identical
+  `Type` object** (verified by reference equality), so the plan's
+  `typebox` import is kept even though Pi's own examples import from
+  `pi-ai`. It is the direct source, and it justifies the `typebox`
+  peer dependency.
+
+  Three things settled here that earlier tasks deferred:
+
+  - **The child-context refusal** from Task 1.6 now has a reader:
+    `execute` throws before doing anything if `inChildContext()`.
+  - **Tool-name validation** from Task 1.3, done here rather than at
+    discovery because only `pi.getAllTools()` knows the real set, and
+    it is read lazily — other extensions register tools too, and the
+    full set settles only once the session runs. Unknown names are
+    dropped from the allowlist and reported in the result text.
+  - **The agent file's `thinking` level is honoured now.** It needs no
+    resolution. Its `model` is a *name*, so it waits for
+    `resolveModel` in Slice 2.
+
+  > [!NOTE]
+  > **A tool reports failure by throwing.** `AgentToolResult` has no
+  > `isError` field; Pi's agent loop catches a thrown error from
+  > `execute` and converts it to `isError: true` carrying the message
+  > (`pi-agent-core/dist/agent-loop.js:472-478`). So the spec's
+  > "refuses an unknown subagent type" is a `throw`.
+
+  A deliberate asymmetry: bad arguments (unknown type, no agents
+  defined, spawning from a child) **throw**, but a subagent that ran
+  and *failed* comes back as an ordinary result with
+  `details.status: "failed"`. The delegation worked; the subagent's
+  failure is information the main agent should reason about, and
+  throwing would also discard whatever partial output it produced.
+
+  Verified beyond the unit tests: the module loads under **Pi's own
+  jiti transpiler** and registers `spawn_subagent` with the three
+  expected required parameters. That check matters because the
+  `.ts`-suffixed imports work under vitest but could have failed under
+  a different loader.
+
+  > [!WARNING]
+  > **The slice is not demoable yet.** This repository has no
+  > `.pi/agents/` directory, so the tool correctly reports that no
+  > subagents are defined. The example agent files in the
+  > Documentation checklist are what make a live walkthrough possible.
+  > Note also that `pi` cannot write `~/.pi/agent/settings.json.lock`
+  > under the sandbox used here, so the live check has to run outside
+  > it.
 
 - [ ] **Task 1.8**: Tests at the tool boundary.
 
