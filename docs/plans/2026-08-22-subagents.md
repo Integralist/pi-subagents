@@ -523,7 +523,7 @@ That has a direct consequence for how the work is handed out.
 - **Execution**: **`/tasks` candidate.** `resolveModel` is a pure function over
   `ModelRegistry.getAll()`, which is already verified. Fully mechanical.
 
-- [ ] **Task 2.1**: Implement fuzzy resolution in `src/model-resolver.ts`.
+- [x] **Task 2.1**: Implement fuzzy resolution in `src/model-resolver.ts`.
 
   ```typescript
   export type ResolveModelResult =
@@ -548,6 +548,25 @@ That has a direct consequence for how the work is handed out.
   Given the same, when resolving `"nope"`, then the result is not-ok
   with both names listed.
 
+  Four decisions the signature left open:
+
+  - **The not-ok result carries `reason: "unknown" | "ambiguous"`.**
+    Without it the caller cannot tell "no such model, here is
+    everything" from "'gpt' matches four, here are those four" — and
+    `available` means a different set in each case. Distinguishing it
+    here beats making every caller infer it.
+  - **Ambiguity is terminal at its tier**, not retried against the
+    looser ones. Falling through would let a broader query succeed
+    where a narrower one failed, which is harder to predict than
+    refusing.
+  - **Comparisons are case-insensitive and the query is trimmed**,
+    including the two "exact" tiers. A caller typing `"Flash"` meant
+    `flash`.
+  - **`getAll()`, per the plan, not `getAvailable()`.** A model that
+    exists but has no configured auth still resolves, so the failure
+    surfaces as a provider auth error naming the model rather than
+    "unknown model". Worth revisiting if that proves confusing.
+
 - [ ] **Task 2.2**: Add `model` and `thinking` to the tool schema.
 
   ```typescript
@@ -568,6 +587,20 @@ That has a direct consequence for how the work is handed out.
 
   Frontmatter `model:` applies when the caller gives none; the caller
   wins when both are present.
+
+  > [!WARNING]
+  > **`ThinkingLevel` is not one type — the two packages disagree, and
+  > this task has to settle it.** `pi-agent-core/dist/types.d.ts:260`
+  > includes `"off"`; `pi-ai/dist/types.d.ts:23` does **not**, and
+  > names the with-`off` version `ModelThinkingLevel`. Slice 1 imported
+  > the type from `pi-ai`, so `AgentConfig.thinking` and
+  > `RunSubagentOptions.thinkingLevel` currently cannot hold `"off"`
+  > even though `createAgentSession` accepts it — and
+  > `THINKING_LEVELS` in `src/agents.ts` silently drops it from an
+  > agent file. Before adding `"off"` to this enum, either switch those
+  > imports to the `pi-agent-core` spelling or drop `"off"` from the
+  > enum. Note that YAML parses a bare `off` as boolean `false`, so an
+  > agent file has to write `thinking: "off"` regardless.
 
 ### Slice 3: Background execution, registry, and completion notices
 
