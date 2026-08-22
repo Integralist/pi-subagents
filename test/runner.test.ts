@@ -6,7 +6,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agents.ts";
-import { runSubagent, SubagentError } from "../src/runner.ts";
+import {
+	inChildContext,
+	runInChildContext,
+	runSubagent,
+	SubagentError,
+} from "../src/runner.ts";
 
 /**
  * A stand-in for one assistant reply. Only the fields `runSubagent` reads are
@@ -443,6 +448,112 @@ describe("runSubagent failure containment", () => {
 
 		expect(outcome.status).toBe("stopped");
 		expect(rejectionObserved).toBe(true);
+	});
+});
+
+/**
+ * The recursion guard. A subagent that could spawn subagents would fork the
+ * host process without bound, so the flag must be set for everything a child
+ * does and clear for everything else.
+ */
+describe("child context", () => {
+	it("is not a child context by default", () => {
+		expect(inChildContext()).toBe(false);
+	});
+
+	it("is a child context inside a wrapped run", async () => {
+		const seen = await runInChildContext(async () => inChildContext());
+
+		expect(seen).toBe(true);
+	});
+
+	it("stays set across an await inside a wrapped run", async () => {
+		const seen = await runInChildContext(async () => {
+			await new Promise((resolve) => setImmediate(resolve));
+			return inChildContext();
+		});
+
+		expect(seen).toBe(true);
+	});
+
+	it("is clear again once the wrapped run finishes", async () => {
+		await runInChildContext(async () => undefined);
+
+		expect(inChildContext()).toBe(false);
+	});
+
+	it("is clear again even when the wrapped run throws", async () => {
+		await expect(
+			runInChildContext(async () => {
+				throw new Error("child blew up");
+			}),
+		).rejects.toThrow("child blew up");
+
+		expect(inChildContext()).toBe(false);
+	});
+
+	it("does not leak into work running concurrently beside it", async () => {
+		// Slice 3 runs several subagents at once. A sibling operation that is not
+		// itself a child must not inherit the flag from one that is.
+		//
+		// The child is held mid-flight on a gate so the sibling reads the flag
+		// while the child is genuinely still running. Without the gate, the child
+		// finishes and clears the flag before the sibling looks, and a plain
+		// module-level boolean would pass this test despite leaking.
+		let release: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+
+		const childRun = runInChildContext(async () => {
+			await gate;
+			return inChildContext();
+		});
+
+		const siblingSaw = inChildContext();
+		release();
+
+		expect(await childRun).toBe(true);
+		expect(siblingSaw).toBe(false);
+	});
+});
+
+describe("runSubagent recursion guard", () => {
+	it("runs the child session inside a child context", async () => {
+		let duringPrompt: boolean | undefined;
+		let duringFactory: boolean | undefined;
+		const stub = stubFactory({
+			onPrompt: () => {
+				duringPrompt = inChildContext();
+			},
+		});
+		const createSession = vi.fn(async (opts) => {
+			duringFactory = inChildContext();
+			return stub.createSession(opts);
+		});
+
+		await runSubagent({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			createSession,
+		});
+
+		expect(duringFactory).toBe(true);
+		expect(duringPrompt).toBe(true);
+	});
+
+	it("leaves the parent out of the child context once the run is over", async () => {
+		const stub = stubFactory();
+
+		await runSubagent({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			createSession: stub.createSession,
+		});
+
+		expect(inChildContext()).toBe(false);
 	});
 });
 

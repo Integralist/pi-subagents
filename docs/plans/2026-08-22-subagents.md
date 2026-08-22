@@ -371,7 +371,7 @@ That has a direct consequence for how the work is handed out.
   The rejection is instead probed with a thenable that records whether
   the caller supplied a rejection callback.
 
-- [ ] **Task 1.6**: Add the recursion guard.
+- [x] **Task 1.6**: Add the recursion guard.
 
   `noExtensions: true` on the child's loader (Task 1.4) means the
   child never loads this extension, so it cannot gain the spawn tools.
@@ -388,6 +388,27 @@ That has a direct consequence for how the work is handed out.
 
   Async-context-local rather than a module global, so concurrent
   spawns in Slice 3 do not see each other's flag.
+
+  Lives in `src/runner.ts` rather than a module of its own: six lines,
+  used by the runner and by `index.ts` in Task 1.7. `runSubagent` wraps
+  the whole run, so every tool call a child makes is marked too.
+
+  The guard is worth more than "belt and braces". Task 1.5 established
+  that `noExtensions: true` suppresses only the *settings-configured*
+  extensions — anything in `additionalExtensionPaths` still loads
+  (`dist/core/resource-loader.js:315-317`). Today the child passes no
+  such paths, so it loads nothing; the day one is passed down, this
+  flag is the only thing standing between a subagent and unbounded
+  recursion.
+
+  > [!IMPORTANT]
+  > **Testing this needs a gate, not a race.** The obvious test — start
+  > a wrapped run and a bare sibling concurrently, then check the
+  > sibling sees `false` — passes even against a plain module-level
+  > boolean, because the child finishes and clears the flag before the
+  > sibling looks. Hold the child suspended on a promise the test
+  > controls and read the flag while it is genuinely mid-flight. Only
+  > that ordering distinguishes `AsyncLocalStorage` from a global.
 
 - [ ] **Task 1.7**: Register `spawn_subagent` in `src/index.ts`.
 

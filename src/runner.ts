@@ -7,6 +7,7 @@
  * the host's, so nothing it does reaches the parent's conversation.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Api, Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import {
 	type CreateAgentSessionOptions,
@@ -19,6 +20,30 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "./agents.ts";
+
+/**
+ * Marks everything a subagent does, so the spawn tools can refuse to run there.
+ *
+ * A subagent that could spawn subagents would fork the host process without
+ * bound. The child's loader already sets `noExtensions`, which stops it loading
+ * this extension and so stops it seeing the tools at all — but that flag is
+ * narrower than it looks. It suppresses only the settings-configured
+ * extensions; anything in `additionalExtensionPaths` still loads
+ * (`dist/core/resource-loader.js:315-317`). This flag states the intent
+ * directly, so it survives a change that starts passing that option down.
+ *
+ * Async-context-local rather than a module-level boolean: Slice 3 runs several
+ * subagents at once, and a sibling operation must not inherit a flag set by
+ * whichever child happens to be running beside it.
+ */
+const childContext = new AsyncLocalStorage<boolean>();
+
+/** Whether the caller is running inside a subagent. */
+export const inChildContext = (): boolean => childContext.getStore() === true;
+
+/** Run `fn` marked as subagent work, including everything it awaits. */
+export const runInChildContext = <T>(fn: () => Promise<T>): Promise<T> =>
+	childContext.run(true, fn);
 
 /**
  * How a session gets made. Real runs use Pi's `createAgentSession`; tests pass
@@ -206,7 +231,9 @@ export async function runSubagent(
 	opts: RunSubagentOptions,
 ): Promise<SubagentOutcome> {
 	try {
-		return await runSubagentUnguarded(opts);
+		// Inside the child context, so anything the child session does — every
+		// tool call it makes included — is marked as subagent work.
+		return await runInChildContext(() => runSubagentUnguarded(opts));
 	} catch (error) {
 		return {
 			status: "failed",
