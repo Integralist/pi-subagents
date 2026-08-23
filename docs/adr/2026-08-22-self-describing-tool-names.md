@@ -3,6 +3,12 @@
 - **Status**: Accepted
 - **Date**: 2026-08-22
 - **Deciders**: Integralist
+- **Amended by**:
+  [List subagents rather than wait for them](2026-08-23-list-subagents-rather-than-wait.md)
+  (four registered tools becomes five) and
+  [Let a subagent's persona be supplied at spawn time](2026-08-23-personas-supplied-at-spawn.md)
+  (the parameter shape below gains `system_prompt`, `tools`, and
+  `name`)
 
 ## Context
 
