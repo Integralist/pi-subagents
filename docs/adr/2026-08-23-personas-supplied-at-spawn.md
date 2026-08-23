@@ -102,8 +102,15 @@ We will not ship neutral `general` or `general-readonly` agent files.
 Easier: a skill can ask for any persona it can describe, and needs no
 files of its own. A project with no agent files at all can now
 delegate, so `buildToolDescription` must stop saying the tool cannot
-be used yet (`src/index.ts:191-198`) and the matching refusal in
-`execute` must go (`src/index.ts:334-339`).
+be used yet and the matching refusal in `execute` must go.
+
+> [!NOTE]
+> Implemented 2026-08-23. That refusal moved rather than went. Naming a
+> `subagent_type` in a project with no agent files is still an error —
+> what changed is that it now says so and points at `system_prompt`.
+> Deleting the guard outright left the call falling through to a
+> generic "unknown type" message listing an empty set of known types,
+> which is worse than what it replaced.
 
 Harder, and accepted rather than mitigated: a supplied persona gives
 up a review step. An agent file is written by a person, read before it

@@ -80,6 +80,13 @@ Loading the extension will not surface it; only a real call will. If a
 provider rejects it, add one optional `status` filter rather than
 inventing a required parameter.
 
+> [!NOTE]
+> Implemented 2026-08-23, and the risk stands unresolved — no real
+> provider call has been made yet. A test now asserts the schema has no
+> properties, so a parameter cannot creep in unnoticed; that guards the
+> decision, not the compatibility. The first live run is what settles
+> it.
+
 ## Source
 
 - [Implementation plan](../plans/2026-08-23-subagent-personas.md)

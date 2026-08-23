@@ -1,6 +1,6 @@
 # Subagent Personas and Listing
 
-- **Status**: Planning
+- **Status**: Complete
 - **Author**: Integralist
 - **Created**: 2026-08-23
 - **Language**: TypeScript
@@ -634,7 +634,7 @@ is one commit on `main`, made at the end of the turn that implements it.
 
 - **Produces**: Nothing
 
-- [ ] **Task 4.1**: Trace the discovery scenarios to existing tests, and
+- [x] **Task 4.1**: Trace the discovery scenarios to existing tests, and
   add nothing that already holds.
 
   The spec's "Discovering agent files" feature documents behaviour that
@@ -656,7 +656,23 @@ is one commit on `main`, made at the end of the turn that implements it.
   a shipped file that fails to parse, names a tool pi does not have, or
   names a model that would refuse the spawn.
 
-- [ ] **Task 4.2**: Update the README.
+  > [!NOTE]
+  > No test added; all five were read, not just matched by name, and
+  > each asserts something *stronger* than its scenario. Both
+  > precedence tests check the winning agent's `source` as well as its
+  > `description`, so they would catch a tier that won for the wrong
+  > reason — a scenario asking only "and it is the project's" would
+  > not. The malformed-file test uses genuinely unparseable YAML with a
+  > comment recording that it was verified to make `parseFrontmatter`
+  > throw, rather than a file merely missing a field, which is covered
+  > separately. The walk-up test descends three levels.
+  >
+  > This is what the discovery section of the spec was for: writing
+  > down behaviour that shipped in the closed plan's Slice 1 and was
+  > widened at `16ceed7`, neither time with a specification to point
+  > at.
+
+- [x] **Task 4.2**: Update the README.
 
   Both ways to start a subagent, the three discovery tiers and their
   precedence, `list_subagents`, and the Claude Code mapping the ADR
@@ -695,19 +711,30 @@ is one commit on `main`, made at the end of the turn that implements it.
 
 ### Verification
 
-- [ ] `make verify` — tests, `tsc --noEmit`, `biome check`, and the load
-  through pi's own jiti loader (`Makefile:36`)
-- [ ] All spec acceptance criteria hold, via `make test`
-- [ ] `mutate.py` reports every listed mutation caught, per slice
-- [ ] A load check through a real pi invocation:
-  `pi -p "…" -e ./src/index.ts --session-dir "$TMPDIR/pi-check"`. From
-  a sandbox this reaches the model check and stops at "No API key
-  found", which is as far as it goes and still proves the extension
-  loads and registers.
+- [x] `make verify` — tests, `tsc --noEmit`, `biome check`, and the load
+  through pi's own jiti loader (`Makefile:36`). 557 tests, all green.
+- [x] All spec acceptance criteria hold, via `make test`
+- [x] `mutate.py` reports every listed mutation caught, per slice — 15
+  mutations across the three code slices, all caught, re-run against the
+  finished tree rather than only when each slice landed.
+- [x] A load check through a real pi invocation:
+  `pi -p "…" -e ./src/index.ts --session-dir "$TMPDIR/pi-check"`. Reaches
+  the model check and stops at "No API key found", as expected from a
+  sandbox — which still proves the extension loads and registers.
 - [ ] `make try` — the interactive walkthrough, which needs a human at a
   terminal. Spawn an inline persona, confirm its row and colour, reach
   it with `@name`, and continue it after it finishes. This is the
   outstanding verification item from the closed plan too.
+
+> [!WARNING]
+> `make try` is the only item here that has never been run, and it is
+> the only one that would exercise a real model. Everything above holds
+> against stubs and the loader. Two things in particular are unproven
+> in a live session: whether a provider accepts `list_subagents`'
+> empty parameter schema, and whether a model reliably invents a short
+> `name` rather than omitting it — the fallback covers the second, but
+> a handle like `@security-and-abuse-review` every time would mean the
+> tool description is not doing its job.
 
 ## File Changes
 

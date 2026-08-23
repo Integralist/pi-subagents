@@ -71,7 +71,7 @@ That is the four checks this repository holds itself to:
 
 | Target            | What it does                                     |
 | ----------------- | ------------------------------------------------ |
-| `make test`       | 528 tests under `vitest`                         |
+| `make test`       | 557 tests under `vitest`                         |
 | `make typecheck`  | `tsc --noEmit`                                   |
 | `make lint`       | `biome check src test`                           |
 | `make load-check` | loads the extension through pi's own jiti loader |
@@ -113,7 +113,8 @@ that a review skill expects. See "Running a dimension-split review" below.
 ## Defining a subagent
 
 An agent is a Markdown file with YAML frontmatter, in one of the three
-directories above.
+directories above. A subagent can also be described in the spawn call rather
+than written down — see "Subagents with no file behind them" below.
 
 ```markdown
 ---
@@ -151,16 +152,62 @@ with anything that fails to parse — one bad file never hides the rest.
 > Quote `"off"` if you want that thinking level: a bare `off` is boolean
 > `false` in YAML.
 
+## Subagents with no file behind them
+
+A file is one way to define a subagent. The other is to describe one in the
+spawn call itself, which is what a skill does when it wants "a security expert"
+or "a performance analyst" and has no file to point at.
+
+```txt
+spawn_subagent(
+  name: "security",
+  system_prompt: "You are the Security and Abuse Resistance reviewer...",
+  tools: ["read", "grep", "find", "ls"],
+  prompt: "Review the diff at $TMPDIR/review.diff ...",
+  description: "Security and abuse review",
+)
+```
+
+That subagent is not second-class. It gets a row and a colour, it can be
+watched and steered, and `@security` reaches it and continues it after it
+finishes — its record carries its own definition, so nothing has to exist on
+disk for it to come back.
+
+Three rules are worth knowing:
+
+- **The main model picks the name, never you.** The tool asks it for a short
+  distinct name per subagent, so "spin up five subagents that each try this a
+  different way" produces five addressable subagents without you naming any.
+  A call that omits `name` gets a handle derived from `description` —
+  `@security-and-abuse-review` — because refusing would send the model back to
+  you for a name.
+- **A name an agent file already uses is refused.** A prompt a model composed
+  cannot quietly shadow a persona you wrote and read.
+- **It is one route or the other.** Supply `system_prompt` or name a
+  `subagent_type`, not both.
+
+> [!NOTE]
+> A file is reviewable and reusable; a supplied character is neither — nobody
+> reads it before it runs. `tools` is what bounds one, so a reviewer that must
+> not change anything should say so.
+
 ## What the main model can do
 
-Four tools, all addressing a subagent by the id that `spawn_subagent` returns.
+Five tools. Four address one subagent by the id that `spawn_subagent` returns;
+`list_subagents` addresses none.
 
-| Tool                  | Parameters                                                                    |
-| --------------------- | ----------------------------------------------------------------------------- |
-| `spawn_subagent`      | `subagent_type`, `prompt`, `description`, `model?`, `thinking?`, `max_turns?` |
-| `get_subagent_result` | `id`                                                                          |
-| `steer_subagent`      | `id`, `message`                                                               |
-| `stop_subagent`       | `id`                                                                          |
+| Tool                  | Parameters                                     |
+| --------------------- | ---------------------------------------------- |
+| `spawn_subagent`      | `prompt`, `description`, and one of the routes |
+| `get_subagent_result` | `id`                                           |
+| `list_subagents`      | none                                           |
+| `steer_subagent`      | `id`, `message`                                |
+| `stop_subagent`       | `id`                                           |
+
+The two routes into `spawn_subagent` are `subagent_type`, naming an agent file,
+or `system_prompt` with an optional `name` and `tools`. One or the other, never
+both. `model`, `thinking` and `max_turns` are optional either way, and each
+overrides whatever an agent file set.
 
 `spawn_subagent` returns as soon as the subagent is under way; the answer
 arrives in the conversation on its own when it is done, so the main model can
@@ -168,6 +215,22 @@ carry on meanwhile. `get_subagent_result` reads that answer back on demand.
 `steer_subagent` redirects one mid-run — a subagent still waiting for a slot
 takes the message into the task it starts on. `stop_subagent` halts one and
 keeps whatever it had worked out.
+
+`list_subagents` reports all of them at once:
+
+```txt
+4 subagents in this session:
+
+- behaviour (a1f2c3d4) — completed — Behaviour and tests review
+- security (b3c4e5f6) — running — Security and abuse review
+- reliability (c5d6a7b8) — completed — Reliability review
+- maintainability (d7e8f9a0) — queued — Maintainability review
+```
+
+It exists because each subagent announces itself separately, so a skill that
+must read several results together would otherwise have to remember every id
+and ask after each one — and would quietly do less work if it lost one. You can
+see this list below the prompt; this is how the main model sees it.
 
 A subagent cannot spawn subagents of its own, and a subagent that crashes
 becomes a failed row in the list rather than a failed session.
@@ -226,7 +289,8 @@ reason it could not be delivered — appears as a notification.
 
 A code-review skill that splits a review across dimensions — behaviour,
 security, reliability, maintainability, plan adherence — has everything it needs
-here. The six review agents are the roles; the skill supplies the inputs.
+here. The six review agents are the roles and the skill supplies the inputs, or
+the skill can carry its own roles as `system_prompt` and use no files at all.
 
 The flow, once the skill has gathered the diff once into a temp file:
 
@@ -247,9 +311,10 @@ The flow, once the skill has gathered the diff once into a temp file:
    start as slots free.
 
 1. Each answer arrives in the conversation on its own when that subagent
-   finishes. The main model can also read one early with `get_subagent_result`,
-   which is how it checks whether the others are still working before it moves
-   on to verification.
+   finishes, waking the main model once per dimension. `list_subagents` is how
+   it tells whether the rest are still working before it moves on to
+   verification — one call, rather than `get_subagent_result` per dimension and
+   a partial review if it loses an id.
 
 1. The verification wave spawns `verifier` subagents, one per finding or a batch
    each. Past five they queue, which is exactly the batching a capped platform
@@ -291,8 +356,9 @@ column of the list.
 ## How it works, in one paragraph
 
 A subagent is a real pi `AgentSession` built inside the host process, with the
-agent file's system prompt, its own transcript file, and no extensions loaded —
-which is also what stops it spawning subagents of its own. Its transcript lives
+system prompt it was given — from an agent file or from the spawn call — its own
+transcript file, and no extensions loaded, which is also what stops it spawning
+subagents of its own. Its transcript lives
 beside your own sessions and is nested under the session that spawned it, so a
 finished subagent can be picked back up later. Runs are detached: the tool
 returns an id immediately and the answer is delivered into the conversation as a
