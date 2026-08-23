@@ -1700,6 +1700,21 @@ That has a direct consequence for how the work is handed out.
   > **The bar above the composer stays**, saying `enter sends · esc
   > abandons`. The composer takes escape, so without it the only way
   > out of a half-typed message is a guess.
+  >
+  > **Superseded 2026-08-23, after the first live run.** There is no
+  > composer to open any more: the prompt is on screen for as long as
+  > the subagent can be reached, keys go straight to it, and enter
+  > sends. The user opened the panel and asked whether steering was
+  > meant to happen through `@handle` from the main prompt — it was on
+  > `enter`, and nothing on screen said so, which is the whole failure
+  > of an affordance behind a keypress. Escape now clears a half-typed
+  > message and closes only once the prompt is empty, so the reason the
+  > bar existed is gone. Stopping moved from `delete` to `ctrl+x`,
+  > because a key that edits a message must not also halt the subagent
+  > it is being typed to. The panel gained a heavy frame in the same
+  > pass, its rails carrying the subagent's name and the keys: pi's
+  > overlays have no border, and without one the view read as more of
+  > the conversation underneath it.
 
 - [x] **Task 10.3**: Stay open when the subagent finishes.
 

@@ -2,9 +2,17 @@
  * One subagent's conversation, opened over the session that spawned it.
  *
  * The list below the prompt says what every subagent is doing; this says what
- * one of them is actually saying. It is shown as a focused overlay, so unlike
- * the list it receives keys directly: enter opens a composer that steers the
- * subagent, delete stops it, and escape closes the view.
+ * one of them is actually saying, and is where it is talked back to. It is
+ * shown as a focused overlay, so unlike the list it receives keys directly:
+ * they go to the prompt at the foot of the panel, enter sends what is typed
+ * there, ctrl+x stops the subagent, and escape clears the prompt and then
+ * closes the view.
+ *
+ * Two things about it are drawn rather than assumed. The frame is one: pi's
+ * overlays carry no border of their own, so a panel without one reads as more
+ * of the conversation underneath it. The prompt is the other: it is always on
+ * screen for a subagent that can still be reached, because steering hidden
+ * behind a keypress is steering nobody finds.
  *
  * The view draws from the child's messages rather than from a copy of its own,
  * which is what lets it stay open after the subagent finishes — a disposed
@@ -28,10 +36,7 @@ import {
 	type SubagentRegistry,
 	TERMINAL_STATUSES,
 } from "../registry.ts";
-// The glyph alone carries the status here: the header sits on the selection
-// background, and a status colour on top of it reads as a rendering fault
-// rather than as information.
-import { STATUS_MARK } from "./status.ts";
+import { STATUS_COLOR, STATUS_MARK } from "./status.ts";
 import { Transcript } from "./transcript.ts";
 
 /** Rows the view keeps for the conversation when the terminal is tiny. */
@@ -45,10 +50,33 @@ const MIN_BODY_ROWS = 3;
  */
 const RESERVED_ROWS = 4;
 
-/** What the footer offers, by whether the subagent can still be reached. */
-const LIVE_HINTS = "enter steer · del stop · esc close";
+/**
+ * The frame's glyphs, heavy throughout.
+ *
+ * Heavy rather than light on purpose: the panel sits over a conversation drawn
+ * in the same colours, and a thin rule beside a transcript's own box-drawing is
+ * not an edge anyone reads as one.
+ */
+const FRAME = {
+	topLeft: "┏",
+	topRight: "┓",
+	bottomLeft: "┗",
+	bottomRight: "┛",
+	side: "┃",
+	rule: "━",
+	teeLeft: "┣",
+	teeRight: "┫",
+} as const;
+
+/** Cells a rail spends on corners and on the lead-in rule. */
+const RAIL_CHROME = 3;
+
+/** Cells a content row spends on its two sides and their padding. */
+const ROW_CHROME = 4;
+
+/** What the bottom rail offers, by whether the subagent can still be reached. */
+const LIVE_HINTS = "enter steer · ctrl+x stop · esc close";
 const FINISHED_HINTS = "esc close";
-const COMPOSING_HINTS = "enter sends · esc abandons";
 
 export interface SubagentViewerOptions {
 	record: SubagentRecord;
@@ -89,8 +117,15 @@ export class SubagentViewer implements Component {
 	readonly #transcript: Transcript;
 	readonly #teardown: Array<() => void> = [];
 	readonly #requestRender: () => void;
-	/** The composer, while one is open. Its presence is the composing state. */
-	#composer: Input | undefined;
+	/**
+	 * The prompt, made once and kept.
+	 *
+	 * Always here, drawn only while the subagent can be reached: a subagent that
+	 * finishes mid-message takes its prompt off screen, and rebuilding the input
+	 * on every status change would lose what was being typed to a subagent that
+	 * is still running.
+	 */
+	readonly #input = new Input();
 	/** What the last steer or stop came back with, shown until the next one. */
 	#notice: string | undefined;
 	/** Whether this view is already listening to the child's session. */
@@ -100,6 +135,12 @@ export class SubagentViewer implements Component {
 		this.#options = options;
 		this.#requestRender =
 			options.requestRender ?? (() => options.tui.requestRender());
+		// Focus belongs to this view, not to the input, so the input is told it
+		// has it — that is what makes it draw a cursor. Escape never reaches it:
+		// this view takes that key first, and what it means depends on whether
+		// anything has been typed.
+		this.#input.focused = true;
+		this.#input.onSubmit = (value) => this.#submit(value);
 		this.#transcript = new Transcript({
 			tui: options.tui,
 			cwd: options.cwd,
@@ -149,19 +190,31 @@ export class SubagentViewer implements Component {
 	}
 
 	render(width: number): string[] {
-		const footer = this.#footer(width);
-		const body = this.#body(width);
-		// One row for the header, the footer's own, and the rows left to the
+		const inner = Math.max(1, width - ROW_CHROME);
+		const live = !TERMINAL_STATUSES.has(this.#options.record.status);
+		const foot = this.#foot(width, inner, live);
+		const body = this.#body(inner).map((line) => this.#row(line, width));
+		// The two rails, whatever the foot came to, and the rows left to the
 		// session underneath. What is left is the conversation's.
 		const budget = Math.max(
 			MIN_BODY_ROWS,
-			this.#rows() - 1 - footer.length - RESERVED_ROWS,
+			this.#rows() - 2 - foot.length - RESERVED_ROWS,
 		);
 
 		// The tail, not the head: a view that follows a working subagent has to
 		// show what it just said. Anything older has scrolled off, which is what
 		// the transcript on disk is for.
-		return [this.#header(width), ...body.slice(-budget), ...footer];
+		return [
+			this.#header(width),
+			...body.slice(-budget),
+			...foot,
+			this.#rail(
+				FRAME.bottomLeft,
+				FRAME.bottomRight,
+				live ? LIVE_HINTS : FINISHED_HINTS,
+				width,
+			),
+		];
 	}
 
 	#rows(): number {
@@ -169,10 +222,46 @@ export class SubagentViewer implements Component {
 	}
 
 	/**
-	 * The subagent, named the way its row in the list names it, and its status.
+	 * A rail: two corners, a lead-in rule, whatever is inlaid, and rule to the
+	 * end of the row.
 	 *
-	 * Drawn on the selection background so the view reads as a panel over the
-	 * session rather than as more conversation.
+	 * The label is laid into the frame rather than given a row of its own,
+	 * because the panel's two most useful lines — which subagent this is, and
+	 * what the keys do — are also the two the transcript would push off screen
+	 * first if they were content.
+	 */
+	#rail(left: string, right: string, label: string, width: number): string {
+		const { theme } = this.#options;
+		const room = Math.max(0, width - RAIL_CHROME - 2);
+		const inlaid = label ? ` ${truncateToWidth(label, room, "…", false)} ` : "";
+		const fill = FRAME.rule.repeat(
+			Math.max(0, width - RAIL_CHROME - visibleWidth(inlaid)),
+		);
+
+		return (
+			theme.fg("borderAccent", `${left}${FRAME.rule}`) +
+			inlaid +
+			theme.fg("borderAccent", `${fill}${right}`)
+		);
+	}
+
+	/** One line of content, held between the frame's sides. */
+	#row(line: string, width: number): string {
+		const { theme } = this.#options;
+		const inner = Math.max(0, width - ROW_CHROME);
+		// Only when it would overflow: truncating unconditionally would rewrite
+		// the prompt's line, and the cursor is a marker inside it.
+		const fitted =
+			visibleWidth(line) > inner
+				? truncateToWidth(line, inner, "…", false)
+				: line;
+		const side = theme.fg("borderAccent", FRAME.side);
+		return `${side} ${pad(fitted, inner)} ${side}`;
+	}
+
+	/**
+	 * The top rail: the subagent, named the way its row in the list names it,
+	 * and its status.
 	 */
 	#header(width: number): string {
 		const { record, theme } = this.#options;
@@ -180,10 +269,15 @@ export class SubagentViewer implements Component {
 			record.contextPercent === null
 				? ""
 				: ` ${Math.round(record.contextPercent)}%`;
-		const heading = `${STATUS_MARK[record.status]} ${record.handle} — ${record.description}${percent}`;
-		return theme.bg(
-			"selectedBg",
-			pad(truncateToWidth(heading, width, "…", false), width),
+		const mark = theme.fg(
+			STATUS_COLOR[record.status],
+			STATUS_MARK[record.status],
+		);
+		return this.#rail(
+			FRAME.topLeft,
+			FRAME.topRight,
+			`${mark} ${record.handle} — ${record.description}${percent}`,
+			width,
 		);
 	}
 
@@ -206,100 +300,78 @@ export class SubagentViewer implements Component {
 	}
 
 	/**
-	 * The composer when one is open, and otherwise what the keys do.
+	 * Everything between the conversation and the bottom rail: the prompt, and
+	 * whatever the last steer or stop came back with.
 	 *
-	 * A notice from the last steer or stop sits above either, because the answer
-	 * to "did that work" belongs next to where the key was pressed.
+	 * A notice sits directly above the prompt, because the answer to "did that
+	 * work" belongs next to where the message was typed. The rule above them
+	 * separates the panel's own rows from the subagent's, which otherwise run
+	 * together.
 	 */
-	#footer(width: number): string[] {
-		const { record, theme } = this.#options;
-		const lines: string[] = [];
+	#foot(width: number, inner: number, live: boolean): string[] {
+		const { theme } = this.#options;
+		const rows: string[] = [];
 
 		if (this.#notice) {
-			lines.push(theme.fg("muted", ` ${this.#notice}`));
+			rows.push(this.#row(theme.fg("muted", this.#notice), width));
 		}
 
-		if (this.#composer) {
-			// The bar stays, saying what the two keys the composer takes will do.
-			// Without it the only way out of a half-typed message is a guess.
-			lines.push(theme.bg("selectedBg", pad(` ${COMPOSING_HINTS}`, width)));
-			lines.push(...this.#composer.render(width));
-			return lines;
+		if (live) {
+			rows.push(
+				...this.#input.render(inner).map((line) => this.#row(line, width)),
+			);
 		}
 
-		const hints = TERMINAL_STATUSES.has(record.status)
-			? FINISHED_HINTS
-			: LIVE_HINTS;
-		lines.push(theme.bg("selectedBg", pad(` ${hints}`, width)));
-		return lines;
+		return rows.length > 0
+			? [this.#rail(FRAME.teeLeft, FRAME.teeRight, "", width), ...rows]
+			: rows;
 	}
 
 	handleInput(data: string): void {
-		// The composer owns every key while it is open, including escape and
-		// enter, which it reports back through the callbacks set up with it.
-		if (this.#composer) {
-			this.#composer.handleInput(data);
-			this.#requestRender();
+		// Taken before the prompt sees it, and taken whatever is half-typed: a
+		// subagent that should be stopped should not have to be stopped twice.
+		if (matchesKey(data, Key.ctrl("x"))) {
+			this.#stop();
 			return;
 		}
 
+		const live = !TERMINAL_STATUSES.has(this.#options.record.status);
+
 		if (matchesKey(data, Key.escape)) {
+			// A half-typed message goes before the view does. The prompt is always
+			// open now, so escape closing outright would throw a message away every
+			// time somebody changed their mind about sending it.
+			if (live && this.#input.getValue() !== "") {
+				this.#input.setValue("");
+				this.#requestRender();
+				return;
+			}
 			this.#options.close();
 			return;
 		}
 
-		if (matchesKey(data, Key.enter)) {
-			this.#compose();
+		// Nothing to type to. A finished subagent's view is for reading, and its
+		// keys are the ones the bottom rail names.
+		if (!live) {
 			return;
 		}
 
-		if (matchesKey(data, Key.delete)) {
-			this.#stop();
-		}
-	}
-
-	/**
-	 * Open a composer, or say why there is nothing to say anything to.
-	 *
-	 * Refusing here rather than on submit means nobody types a message for a
-	 * subagent that finished while they were reading it — the message would be
-	 * thrown away, which is worse than not asking for it.
-	 */
-	#compose(): void {
-		if (TERMINAL_STATUSES.has(this.#options.record.status)) {
-			this.#notice = "It has already finished, so it cannot be steered.";
-			this.#requestRender();
-			return;
-		}
-
-		const composer = new Input();
-		// Focus belongs to this view, not to the composer, so the composer is
-		// told it has it — that is what makes it draw a cursor.
-		composer.focused = true;
-		composer.onEscape = () => this.#closeComposer(undefined);
-		composer.onSubmit = (value) => this.#submit(value);
-		this.#composer = composer;
-		this.#notice = undefined;
+		this.#input.handleInput(data);
 		this.#requestRender();
 	}
 
-	/** An empty message is a cancelled one: there is nothing to send. */
+	/** An empty message is not one: there is nothing to send. */
 	#submit(value: string): void {
 		if (!value.trim()) {
-			this.#closeComposer(undefined);
 			return;
 		}
 
-		this.#closeComposer("Sending…");
+		this.#input.setValue("");
+		this.#notice = "Sending…";
+		this.#requestRender();
 		void this.#options.steer(this.#options.record, value).then((result) => {
 			this.#report(result, "Sent.");
 		});
-	}
-
-	#closeComposer(notice: string | undefined): void {
-		this.#composer = undefined;
-		this.#notice = notice;
-		this.#requestRender();
 	}
 
 	#stop(): void {

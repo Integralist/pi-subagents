@@ -2,7 +2,11 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentSession, Theme } from "@earendil-works/pi-coding-agent";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, type TUI } from "@earendil-works/pi-tui";
+import {
+	stripTerminalSequences,
+	type TUI,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControlResult } from "../../src/control.ts";
 import { type SubagentRecord, SubagentRegistry } from "../../src/registry.ts";
@@ -16,7 +20,9 @@ beforeAll(() => {
 const UP = "\x1b[A";
 const ENTER = "\r";
 const ESC = "\x1b";
-const DELETE = "\x1b[3~";
+const BACKSPACE = "\x7f";
+/** Stopping, since delete now edits the message the prompt is holding. */
+const CTRL_X = "\x18";
 
 const WIDTH = 60;
 /** Tall enough that nothing is cut off unless a test asks for a short view. */
@@ -170,7 +176,7 @@ function text(subject: SubagentViewer, width = WIDTH): string {
 	return plain(subject, width).join("\n");
 }
 
-/** Type a message into an open composer. */
+/** Type a message into the panel's prompt. */
 function type(subject: SubagentViewer, message: string): void {
 	for (const character of message) {
 		subject.handleInput(character);
@@ -289,6 +295,68 @@ describe("SubagentViewer", () => {
 		});
 	});
 
+	/**
+	 * The overlay sits over the session that spawned it, and without an edge of
+	 * its own it reads as more of that conversation rather than as a panel over
+	 * it — which is exactly how it was reported.
+	 */
+	describe("the frame", () => {
+		it("closes the frame on every side", () => {
+			session.messages = [assistant("No race here.")];
+
+			const lines = plain(viewer());
+			const top = lines[0] ?? "";
+			const bottom = lines.at(-1) ?? "";
+
+			expect(top.startsWith("┏")).toBe(true);
+			expect(top.endsWith("┓")).toBe(true);
+			expect(bottom.startsWith("┗")).toBe(true);
+			expect(bottom.endsWith("┛")).toBe(true);
+			for (const line of lines.slice(1, -1)) {
+				expect(line[0]).toMatch(/[┃┣]/);
+				expect(line.at(-1)).toMatch(/[┃┫]/);
+			}
+		});
+
+		it("draws every line to the full width", () => {
+			session.messages = [assistant("No race here."), user("short")];
+
+			for (const line of plain(viewer())) {
+				expect(visibleWidth(line)).toBe(WIDTH);
+			}
+		});
+
+		/**
+		 * The panel is an overlay, and one that filled the terminal would cover
+		 * the prompt it was opened from. The frame and the prompt row have to
+		 * come out of the conversation's share rather than out of that margin.
+		 */
+		it("leaves the session underneath room to show", () => {
+			session.messages = Array.from({ length: 30 }, (_, i) =>
+				assistant(`reply number ${i}`),
+			);
+
+			// Four rows, the margin the view has always kept for the session.
+			expect(plain(viewer({ rows: 20 })).length).toBeLessThanOrEqual(16);
+		});
+
+		/**
+		 * The rails carry the name and the keys, so a frame the transcript pushed
+		 * off the bottom would take the only two things that explain the panel.
+		 */
+		it("keeps its rails when the terminal is tiny", () => {
+			session.messages = Array.from({ length: 30 }, (_, i) =>
+				assistant(`reply number ${i}`),
+			);
+
+			const lines = plain(viewer({ rows: 8 }));
+
+			expect(lines[0]?.startsWith("┏")).toBe(true);
+			expect(lines.at(-1)?.startsWith("┗")).toBe(true);
+			expect(lines.length).toBeLessThanOrEqual(8);
+		});
+	});
+
 	describe("closing", () => {
 		it("closes on escape", () => {
 			viewer().handleInput(ESC);
@@ -341,7 +409,6 @@ describe("SubagentViewer", () => {
 			);
 			const subject = viewer({ steer });
 
-			subject.handleInput(ENTER);
 			type(subject, "check the tests too");
 			subject.handleInput(ENTER);
 			await settle();
@@ -351,28 +418,30 @@ describe("SubagentViewer", () => {
 			expect(steer.mock.calls[0]?.[1]).toBe("check the tests too");
 		});
 
-		it("opens a composer on enter", () => {
+		/**
+		 * The reason this slice exists: steering was behind a keypress nobody
+		 * could see, so the view read as somewhere to watch a subagent rather
+		 * than somewhere to talk to one.
+		 */
+		it("Offers a prompt without asking for one", () => {
 			const subject = viewer();
 
-			subject.handleInput(ENTER);
 			type(subject, "hello");
 
 			expect(text(subject)).toContain("> hello");
 		});
 
-		/** The composer takes escape, so the only way out has to be on screen. */
-		it("says how to send and how to abandon while composing", () => {
-			const subject = viewer();
+		it("says what the keys do beside the prompt", () => {
+			const drawn = text(viewer());
 
-			subject.handleInput(ENTER);
-
-			expect(text(subject)).toContain("esc abandons");
+			expect(drawn).toContain("enter steer");
+			expect(drawn).toContain("ctrl+x stop");
+			expect(drawn).toContain("esc close");
 		});
 
-		it("closes the composer once the message is sent", async () => {
+		it("empties the prompt once the message is sent", async () => {
 			const subject = viewer();
 
-			subject.handleInput(ENTER);
 			type(subject, "hello");
 			subject.handleInput(ENTER);
 			await settle();
@@ -386,11 +455,10 @@ describe("SubagentViewer", () => {
 			const subject = viewer({ steer });
 
 			subject.handleInput(ENTER);
-			subject.handleInput(ENTER);
 			await settle();
 
 			expect(steer).not.toHaveBeenCalled();
-			expect(text(subject)).toContain("enter steer");
+			expect(closed).toBe(0);
 		});
 
 		/** Whitespace is not a message, and a subagent must not be sent one. */
@@ -398,7 +466,6 @@ describe("SubagentViewer", () => {
 			const steer = vi.fn(async () => ({ ok: true }) as ControlResult);
 			const subject = viewer({ steer });
 
-			subject.handleInput(ENTER);
 			type(subject, "   ");
 			subject.handleInput(ENTER);
 			await settle();
@@ -407,21 +474,28 @@ describe("SubagentViewer", () => {
 		});
 
 		/**
-		 * Escape belongs to the composer while one is open. Closing the whole view
-		 * would throw away a half-typed message along with the view.
+		 * Escape clears a half-typed message before it closes anything. Closing
+		 * on the first press would throw the message away with the view, and the
+		 * prompt is always open now, so there is always something to clear.
 		 */
-		it("abandons the message on escape, keeping the view open", async () => {
-			const steer = vi.fn(async () => ({ ok: true }) as ControlResult);
-			const subject = viewer({ steer });
+		it("clears a half-typed message on escape, keeping the view open", () => {
+			const subject = viewer();
 
-			subject.handleInput(ENTER);
 			type(subject, "never mind");
 			subject.handleInput(ESC);
-			await settle();
 
-			expect(steer).not.toHaveBeenCalled();
 			expect(closed).toBe(0);
 			expect(text(subject)).not.toContain("never mind");
+		});
+
+		it("closes on the next escape, once the prompt is empty", () => {
+			const subject = viewer();
+
+			type(subject, "never mind");
+			subject.handleInput(ESC);
+			subject.handleInput(ESC);
+
+			expect(closed).toBe(1);
 		});
 
 		it("reports a refused message rather than losing it silently", async () => {
@@ -429,7 +503,6 @@ describe("SubagentViewer", () => {
 				steer: async () => ({ ok: false, reason: "it has already finished" }),
 			});
 
-			subject.handleInput(ENTER);
 			type(subject, "one more thing");
 			subject.handleInput(ENTER);
 			await settle();
@@ -438,18 +511,22 @@ describe("SubagentViewer", () => {
 		});
 
 		/**
-		 * Refused before the composer opens, not after it is submitted: nobody
-		 * should type a message for a subagent that has already finished.
+		 * Nobody should type a message for a subagent that has already finished:
+		 * the message would be refused, and the prompt is what promises it would
+		 * not be.
 		 */
-		it("will not open a composer for a subagent that has finished", () => {
+		it("shows no prompt for a subagent that has finished", () => {
 			const done = record({ status: "completed" });
 			const subject = viewer({ record: done });
 
-			subject.handleInput(ENTER);
 			type(subject, "hello");
 
-			expect(text(subject)).not.toContain("> hello");
-			expect(text(subject)).toContain("cannot be steered");
+			// The row itself, not just what was typed into it: keys go nowhere for
+			// a finished subagent, so an assertion about the text would pass
+			// against a prompt that was still drawn, empty and inert.
+			expect(
+				plain(subject).find((line) => line.includes("> ")),
+			).toBeUndefined();
 		});
 
 		it("offers no steering for a subagent that has finished", () => {
@@ -460,15 +537,26 @@ describe("SubagentViewer", () => {
 			expect(drawn).toContain("esc close");
 			expect(drawn).not.toContain("enter steer");
 		});
+
+		/** The prompt goes when the subagent does, mid-view. */
+		it("drops the prompt when the subagent finishes while it is open", () => {
+			const open = record();
+			const subject = viewer({ record: open });
+			type(subject, "hello");
+
+			registry.update(open.id, { status: "completed" });
+
+			expect(text(subject)).not.toContain("> hello");
+		});
 	});
 
 	describe("stopping", () => {
-		it("stops the subagent on delete", async () => {
+		it("stops the subagent on ctrl+x", async () => {
 			const stop = vi.fn(async () => ({ ok: true }) as ControlResult);
 			const open = record();
 			const subject = viewer({ record: open, stop });
 
-			subject.handleInput(DELETE);
+			subject.handleInput(CTRL_X);
 			await settle();
 
 			expect(stop).toHaveBeenCalledWith(open);
@@ -480,23 +568,38 @@ describe("SubagentViewer", () => {
 				stop: async () => ({ ok: false, reason: "it has already finished" }),
 			});
 
-			subject.handleInput(DELETE);
+			subject.handleInput(CTRL_X);
 			await settle();
 
 			expect(text(subject)).toContain("it has already finished");
 		});
 
-		/** Delete edits the message while a composer is open, and nothing else. */
-		it("does not stop the subagent while a message is being typed", async () => {
+		/**
+		 * Stopping moved off delete because the prompt is always open now, and a
+		 * key that edits a message must not also kill the subagent it is being
+		 * typed to.
+		 */
+		it("edits the message rather than stopping on backspace", async () => {
 			const stop = vi.fn(async () => ({ ok: true }) as ControlResult);
 			const subject = viewer({ stop });
 
-			subject.handleInput(ENTER);
 			type(subject, "hello");
-			subject.handleInput(DELETE);
+			subject.handleInput(BACKSPACE);
 			await settle();
 
 			expect(stop).not.toHaveBeenCalled();
+			expect(text(subject)).toContain("> hell");
+		});
+
+		it("stops even while a message is being typed", async () => {
+			const stop = vi.fn(async () => ({ ok: true }) as ControlResult);
+			const subject = viewer({ stop });
+
+			type(subject, "hello");
+			subject.handleInput(CTRL_X);
+			await settle();
+
+			expect(stop).toHaveBeenCalledOnce();
 		});
 	});
 });

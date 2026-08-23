@@ -358,10 +358,19 @@ Feature: Showing the subagent list
     Then that subagent's conversation is shown
     And it updates as the subagent works
 
+  Scenario: Offers a prompt without asking for one
+    Given a subagent's conversation is shown
+    Then a prompt to steer it is on screen
+    And the keys it takes are named beside it
+
   Scenario: Steers from the open view
     Given a subagent's conversation is shown
     When the user types a message and submits it
     Then the message is sent into that subagent's conversation
+
+  Scenario: Shows no prompt for a subagent that has finished
+    Given a finished subagent's conversation is shown
+    Then no prompt to steer it is on screen
 
   Scenario: Stays open when the subagent finishes
     Given a subagent's conversation is shown
@@ -683,6 +692,21 @@ tool Pi does not have, or names a model that would refuse the spawn.
   a subagent keeps its colour for its whole life.
 - **The subagent list captures arrow keys only when the prompt is
   empty**, so ordinary typing is never intercepted.
+- **The open conversation is drawn as a framed panel with a prompt of
+  its own.** Pi's overlays carry no border, and without one the panel
+  reads as more of the conversation underneath it; the frame's rails
+  carry the subagent's name and the keys, so neither can be pushed
+  off screen by the transcript. The prompt is on screen for as long
+  as the subagent can be reached, rather than behind a keypress:
+  typing goes to it, enter sends, escape clears it and then closes
+  the view, and stopping moves to `ctrl+x` so that no key which edits
+  a message can also halt the subagent it is being typed to.
+
+> [!NOTE]
+> Added 2026-08-23, after the first live run. The panel had neither —
+> the user could not tell where the overlay began, and asked whether
+> steering was meant to happen through `@handle` from the main prompt.
+> It was on `enter`, and nothing on screen said so.
 
 ## Out of Scope
 

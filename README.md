@@ -71,7 +71,7 @@ That is the four checks this repository holds itself to:
 
 | Target            | What it does                                     |
 | ----------------- | ------------------------------------------------ |
-| `make test`       | 557 tests under `vitest`                         |
+| `make test`       | 567 tests under `vitest`                         |
 | `make typecheck`  | `tsc --noEmit`                                   |
 | `make lint`       | `biome check src test`                           |
 | `make load-check` | loads the extension through pi's own jiti loader |
@@ -259,14 +259,20 @@ cursor movement are never intercepted. With text in the prompt, enter submits it
 as usual.
 
 Opening a subagent shows its conversation as pi draws its own — markdown, tool
-calls, and their output — and follows it as it works. It stays open when the
-subagent finishes, which is usually when the answer is worth reading.
+calls, and their output — inside a framed panel over the session, and follows it
+as it works. It stays open when the subagent finishes, which is usually when the
+answer is worth reading.
+
+The panel's rails carry what explains it: the subagent's name, status and
+context use along the top, the keys along the bottom. A prompt sits at its foot
+for as long as the subagent can still be reached — there is nothing to press to
+get one, and it goes when the subagent finishes.
 
 | Key      | In the open conversation                             |
 | -------- | ---------------------------------------------------- |
-| `enter`  | Compose a message to it; `enter` sends, `escape` not |
-| `delete` | Stop it                                              |
-| `escape` | Close the view                                       |
+| type     | Goes to the prompt; `enter` sends it to the subagent |
+| `ctrl+x` | Stop it                                              |
+| `escape` | Clear the prompt, then close the view                |
 
 ## Talking to a subagent directly
 
