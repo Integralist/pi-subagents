@@ -529,7 +529,7 @@ is one commit on `main`, made at the end of the turn that implements it.
 - **Produces**: `LIST_TOOL_NAME`, `createListTool(deps)` —
   `src/index.ts`
 
-- [ ] **Task 3.1**: Register a fifth tool.
+- [x] **Task 3.1**: Register a fifth tool.
 
   Read-only and stateless: everything it reports is already on the
   record, and `SubagentRegistry.list()` returns launch order
@@ -561,7 +561,7 @@ is one commit on `main`, made at the end of the turn that implements it.
   Register it beside the others at `src/index.ts:801-804`, and correct
   the module doc comment at `src/index.ts:5`, which says four tools.
 
-- [ ] **Task 3.2**: Render the list, and the empty case.
+- [x] **Task 3.2**: Render the list, and the empty case.
 
   ```txt
   4 subagents in this session:
@@ -575,7 +575,7 @@ is one commit on `main`, made at the end of the turn that implements it.
   With none started, say so plainly rather than returning an empty
   string, which a model reads as a failed call.
 
-- [ ] **Task 3.3**: Tests at the tool boundary.
+- [x] **Task 3.3**: Tests at the tool boundary.
 
   - lists every subagent, each entry giving handle, id, status and
     description
@@ -585,13 +585,42 @@ is one commit on `main`, made at the end of the turn that implements it.
   - reports a session with no subagents
   - changes nothing: statuses and conversations are untouched afterwards
 
-- [ ] **Task 3.4**: Mutation-test the slice.
+- [x] **Task 3.4**: Mutation-test the slice.
 
   | Mutation                             | Test that must fail  |
   | ------------------------------------ | -------------------- |
   | Filter out `TERMINAL_STATUSES`       | every-status listing |
   | Return handles only, no id or status | full-entry listing   |
   | Return `""` when the list is empty   | empty-session reply  |
+  | Drop the description from each entry | full-entry listing   |
+  | Give the tool a required argument    | needs-no-arguments   |
+
+  > [!NOTE]
+  > All five caught. The last two were added while writing the tests:
+  > the description is easy to drop without any single assertion
+  > noticing, and the empty parameter schema is the one thing about
+  > this tool that a provider might reject, so it is worth a test that
+  > fails if a parameter ever creeps in.
+
+- [x] **Task 3.5**: Read the rendered output.
+
+  Not in the original plan. Three of this slice's four scenarios assert
+  on a string the caller reads, and `toContain` passing says nothing
+  about whether the whole thing is legible. Rendered to a file and read
+  back, because `vitest` swallows `console.log`:
+
+  ```txt
+  5 subagents in this session:
+
+  - behaviour (a1f2c3d4) — completed — Behaviour and tests review
+  - security (b3c4e5f6) — running — Security and abuse review
+  - reliability (c5d6a7b8) — completed — Reliability review
+  - maintainability (d7e8f9a0) — queued — Maintainability review
+  - plan-adherence (e9f0a1b2) — failed — Plan adherence review
+  ```
+
+  The singular reads correctly too ("1 subagent in this session"), and
+  an empty session says so and names the tool that would change that.
 
 ### Slice 4: Discovery coverage, documentation, and the decision record
 

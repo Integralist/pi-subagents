@@ -2,14 +2,18 @@
  * pi-subagents — delegate work to focused subagents that run as nested
  * in-process sessions.
  *
- * Registers four tools, all of which speak in the id that `spawn_subagent`
- * returns. `spawn_subagent` takes the name of an agent defined under
- * `.pi/agents/` and a task for it, and returns that id straight away — the
- * subagent then works in the background and its answer arrives in the
- * conversation on its own. `get_subagent_result` reads that answer back on
- * demand, for a caller that would rather ask than wait to be told.
- * `steer_subagent` redirects one mid-run, and `stop_subagent` halts one while
- * keeping whatever it had worked out.
+ * Registers five tools, four of which speak in the id that `spawn_subagent`
+ * returns. `spawn_subagent` takes a task and either the name of an agent
+ * defined under `.pi/agents/` or a character to run under, and returns that id
+ * straight away — the subagent then works in the background and its answer
+ * arrives in the conversation on its own. `get_subagent_result` reads that
+ * answer back on demand, for a caller that would rather ask than wait to be
+ * told. `steer_subagent` redirects one mid-run, and `stop_subagent` halts one
+ * while keeping whatever it had worked out.
+ *
+ * `list_subagents` is the exception, taking no id: it reports every subagent in
+ * the session, for a caller holding several at once that needs to know which
+ * are still going.
  */
 
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -53,6 +57,7 @@ export const SPAWN_TOOL_NAME = "spawn_subagent";
 export const RESULT_TOOL_NAME = "get_subagent_result";
 export const STEER_TOOL_NAME = "steer_subagent";
 export const STOP_TOOL_NAME = "stop_subagent";
+export const LIST_TOOL_NAME = "list_subagents";
 
 /** Identifies the list widget to pi, so remounting replaces it rather than
  * stacking a second copy below the first. */
@@ -71,6 +76,17 @@ const THINKING_LEVELS = [
 	"xhigh",
 	"max",
 ] as const satisfies readonly ThinkingLevel[];
+
+/** What the listing tool reports back, for the UI rather than the model. */
+export interface ListDetails {
+	subagents: Array<{
+		id: string;
+		handle: string;
+		agent: string;
+		status: SubagentRecord["status"];
+		description: string;
+	}>;
+}
 
 /** What the tool reports back for logs and for the subagent list. */
 export interface SpawnDetails {
@@ -616,6 +632,74 @@ export function createResultTool(deps: { registry: SubagentRegistry }) {
 }
 
 /**
+ * Every subagent in the session, as one line each.
+ *
+ * The order is the registry's own, which is launch order — the order the caller
+ * asked for these subagents rather than the order slots happened to free, so a
+ * caller reading the list back recognises what it started.
+ */
+function describeList(records: SubagentRecord[]): string {
+	if (records.length === 0) {
+		return (
+			"No subagents have been started in this session. " +
+			`Start one with ${SPAWN_TOOL_NAME}.`
+		);
+	}
+
+	const lines = records.map(
+		(record) =>
+			`- ${record.handle} (${record.id}) — ${record.status} — ` +
+			record.description,
+	);
+	const count =
+		records.length === 1 ? "1 subagent" : `${records.length} subagents`;
+	return [`${count} in this session:`, "", ...lines].join("\n");
+}
+
+/**
+ * What every subagent is doing, in one call.
+ *
+ * Exists because the user can see this list in the interface and the model
+ * cannot. Without it, a caller that started several subagents together can only
+ * learn about them one id at a time through `get_subagent_result`, and only for
+ * as long as it still remembers every id — so a lost id becomes a quietly
+ * partial answer rather than a failure.
+ *
+ * Reads the registry and writes nothing. There is no state here to get wrong.
+ */
+export function createListTool(deps: { registry: SubagentRegistry }) {
+	return defineTool({
+		name: LIST_TOOL_NAME,
+		label: "List Subagents",
+		description:
+			"Every subagent started in this session, with its status. Read this " +
+			`rather than calling ${RESULT_TOOL_NAME} on each id in turn when ` +
+			"several subagents were started together and their results are meant " +
+			"to be read as a set.",
+		// No parameters: a caller that had to know an id to learn anything would
+		// be back where it started.
+		parameters: Type.Object({}),
+
+		async execute() {
+			const records = deps.registry.list();
+
+			return {
+				content: [{ type: "text" as const, text: describeList(records) }],
+				details: {
+					subagents: records.map((record) => ({
+						id: record.id,
+						handle: record.handle,
+						agent: record.type,
+						status: record.status,
+						description: record.description,
+					})),
+				} satisfies ListDetails,
+			};
+		},
+	});
+}
+
+/**
  * Redirecting a subagent that is already working.
  *
  * A refusal is thrown rather than returned as text. The model must not be left
@@ -926,6 +1010,7 @@ export default function (pi: ExtensionAPI): void {
 	);
 
 	pi.registerTool(createResultTool({ registry }));
+	pi.registerTool(createListTool({ registry }));
 	pi.registerTool(createSteerTool({ registry }));
 	pi.registerTool(createStopTool({ registry, queue }));
 	pi.registerMessageRenderer(COMPLETE_MESSAGE_TYPE, renderCompletion);

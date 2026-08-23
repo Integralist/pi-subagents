@@ -13,7 +13,9 @@ import { PALETTE } from "../src/colors.ts";
 import extension, {
 	buildToolDescription,
 	configuredLimit,
+	createListTool,
 	createSpawnTool,
+	LIST_TOOL_NAME,
 	RESULT_TOOL_NAME,
 	SPAWN_TOOL_NAME,
 	STEER_TOOL_NAME,
@@ -21,7 +23,7 @@ import extension, {
 	SUBAGENT_LIST_WIDGET,
 } from "../src/index.ts";
 import { DEFAULT_CONCURRENCY, SubagentQueue } from "../src/queue.ts";
-import { SubagentRegistry } from "../src/registry.ts";
+import { type SubagentRecord, SubagentRegistry } from "../src/registry.ts";
 import { runInChildContext, type SubagentOutcome } from "../src/runner.ts";
 import type { SendMessage } from "../src/spawn.ts";
 import { SubagentList } from "../src/ui/subagent-list.ts";
@@ -269,17 +271,22 @@ describe("extension registration", () => {
 		expect(register().registered.map((t) => t.name)).toContain(STOP_TOOL_NAME);
 	});
 
+	it("registers the tool that lists the session's subagents", () => {
+		expect(register().registered.map((t) => t.name)).toContain(LIST_TOOL_NAME);
+	});
+
 	/**
-	 * The specification's decision, quoted: four tools are registered. A fifth
+	 * The specification's decision, quoted: five tools are registered. A sixth
 	 * would mean something was registered twice, which pi accepts silently.
 	 */
-	it("registers exactly the four tools and no more", () => {
+	it("registers exactly the five tools and no more", () => {
 		expect(
 			register()
 				.registered.map((t) => t.name)
 				.sort(),
 		).toEqual(
 			[
+				LIST_TOOL_NAME,
 				RESULT_TOOL_NAME,
 				SPAWN_TOOL_NAME,
 				STEER_TOOL_NAME,
@@ -1313,6 +1320,113 @@ describe("spawn_subagent with a supplied character", () => {
 
 		expect(run).toHaveBeenCalledOnce();
 		expect(registry.get("sub-1")?.handle).toBe("security");
+	});
+});
+
+describe("list_subagents", () => {
+	/**
+	 * Records built directly rather than spawned: this tool reads the registry
+	 * and nothing else, so a test that has to start subagents to describe a
+	 * status would be testing the spawn path over again.
+	 */
+	function withRecords(
+		...records: Array<Partial<SubagentRecord> & { id: string }>
+	) {
+		const registry = new SubagentRegistry();
+		for (const [index, changes] of records.entries()) {
+			registry.add({
+				handle: `agent-${index + 1}`,
+				type: "reviewer",
+				config: agentConfig(),
+				description: "review agents file",
+				status: "running",
+				color: "cyan",
+				startedAt: 1_000 + index,
+				contextPercent: null,
+				turns: 0,
+				...changes,
+			});
+		}
+		return { tool: createListTool({ registry }), registry };
+	}
+
+	// The specification's scenario, quoted.
+	it("Lists every subagent and its state", async () => {
+		const { tool } = withRecords(
+			{ id: "sub-1", handle: "behaviour", description: "behaviour review" },
+			{ id: "sub-2", handle: "security", description: "security review" },
+			{ id: "sub-3", handle: "reliability", description: "reliability review" },
+			{ id: "sub-4", handle: "maintain", description: "maintainability" },
+		);
+
+		const text = resultText(
+			await tool.execute("call-1", {}, undefined, undefined, ctx),
+		);
+
+		// Each entry gives its handle, its identifier, its status, and its
+		// description — all four, for all four subagents.
+		for (const handle of ["behaviour", "security", "reliability", "maintain"]) {
+			expect(text).toContain(handle);
+		}
+		for (const id of ["sub-1", "sub-2", "sub-3", "sub-4"]) {
+			expect(text).toContain(id);
+		}
+		expect(text).toContain("security review");
+		expect(text).toContain("running");
+	});
+
+	// The specification's scenario outline, quoted: every state is listed.
+	it.each(["queued", "running", "completed", "failed", "stopped"] as const)(
+		"Includes subagents in every state: %s",
+		async (status) => {
+			const { tool } = withRecords({ id: "sub-1", status });
+
+			const text = resultText(
+				await tool.execute("call-1", {}, undefined, undefined, ctx),
+			);
+
+			expect(text).toContain(status);
+			expect(text).toContain("sub-1");
+		},
+	);
+
+	/**
+	 * The specification's scenario, quoted. An empty string would read to the
+	 * caller as a call that failed rather than a session with nothing in it.
+	 */
+	it("Reports a session with no subagents", async () => {
+		const { tool } = withRecords();
+
+		const text = resultText(
+			await tool.execute("call-1", {}, undefined, undefined, ctx),
+		);
+
+		expect(text).toMatch(/no subagents/i);
+	});
+
+	// The specification's scenario, quoted.
+	it("Changes nothing", async () => {
+		const { tool, registry } = withRecords(
+			{ id: "sub-1" },
+			{ id: "sub-2" },
+			{ id: "sub-3" },
+		);
+		const before = registry.list().map((record) => ({ ...record }));
+
+		await tool.execute("call-1", {}, undefined, undefined, ctx);
+
+		expect(registry.list()).toEqual(before);
+		expect(registry.running()).toHaveLength(3);
+	});
+
+	/**
+	 * The reason this tool exists: one call in place of one call per sibling.
+	 * A caller that has to know an id to learn anything is back where it started.
+	 */
+	it("needs no arguments to answer", async () => {
+		const { tool } = withRecords({ id: "sub-1" });
+
+		expect(Object.keys(tool.parameters.properties ?? {})).toEqual([]);
 	});
 });
 
