@@ -363,6 +363,7 @@ export function startSubagent(opts: StartSubagentOptions): SubagentRecord {
 			(candidate) => registry.get(candidate) !== undefined,
 		),
 		type: config.name,
+		config,
 		description,
 		status: "queued",
 		// Counted before the record is added, so the first subagent is index 0.

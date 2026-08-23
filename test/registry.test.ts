@@ -23,6 +23,12 @@ function record(
 		id,
 		handle: id,
 		type: "explore",
+		config: {
+			name: "explore",
+			description: "explores the codebase",
+			systemPrompt: "You explore.",
+			source: "project",
+		},
 		description: "look around",
 		status: "running",
 		color: "cyan",

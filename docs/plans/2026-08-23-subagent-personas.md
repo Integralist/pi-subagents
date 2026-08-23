@@ -80,7 +80,7 @@ is one commit on `main`, made at the end of the turn that implements it.
   - `AgentConfig.filePath` becomes optional: `filePath?: string`
   - `SubagentRecord.config: AgentConfig` — `src/registry.ts`
 
-- [ ] **Task 1.1**: Add `"inline"` to `AgentSource` and make `filePath`
+- [x] **Task 1.1**: Add `"inline"` to `AgentSource` and make `filePath`
   optional.
 
   `filePath` is read nowhere in `src/` outside `agents.ts` itself — only
@@ -107,7 +107,7 @@ is one commit on `main`, made at the end of the turn that implements it.
   }
   ```
 
-- [ ] **Task 1.2**: Store the resolved definition on the record.
+- [x] **Task 1.2**: Store the resolved definition on the record.
 
   `startSubagent` already receives the full `AgentConfig`
   (`src/spawn.ts:346-355`), so this is one field in the record literal
@@ -164,7 +164,7 @@ is one commit on `main`, made at the end of the turn that implements it.
   };
   ```
 
-- [ ] **Task 1.3**: Resolve a continuation's definition by where its
+- [x] **Task 1.3**: Resolve a continuation's definition by where its
   character came from.
 
   `route` currently re-reads the agent file by `record.type` and refuses
@@ -198,7 +198,7 @@ is one commit on `main`, made at the end of the turn that implements it.
   caller (`src/spawn.ts:97-107`), and `route` is its only call site
   (`src/index.ts:757`).
 
-- [ ] **Task 1.4**: Tests, at the input handler and the tool boundary.
+- [x] **Task 1.4**: Tests, at the input handler and the tool boundary.
 
   `test/mention-handler.test.ts` already builds fake `AgentConfig` and
   record fixtures (`test/mention-handler.test.ts:21`), so an inline
@@ -218,7 +218,40 @@ is one commit on `main`, made at the end of the turn that implements it.
   - Given `startSubagent` called with a config, then the record it
     returns carries that config.
 
-- [ ] **Task 1.5**: Mutation-test the slice.
+  > [!NOTE]
+  > Three tests were written, not four. The third case above already
+  > existed as "says so when the subagent finished between the typing
+  > and the send" (`test/mention-handler.test.ts:284`), which sets
+  > `agents = []` against a `"project"` record and asserts the notice
+  > matches `/no agent file/i`. A fourth test was added anyway, under a
+  > name that says what the rule is rather than what the symptom is —
+  > "does not fall back to the stored character when a file is
+  > expected" — because that is the rule a future change is most likely
+  > to break.
+  >
+  > Only two of the four went red: the inline resume and the record
+  > carrying its config. The two file-backed cases passed the moment
+  > they were written, since re-reading the file and refusing when it
+  > is gone is what the code already did. They are regression guards,
+  > and both earn their place — mutation 4 below is caught by one of
+  > them and nothing else.
+
+- [x] **Task 1.5**: Give the record fixtures a `config`.
+
+  Not foreseen, and the one thing in this slice that touched files the
+  plan did not name. `config` being required breaks six test files that
+  build `SubagentRecord` literals directly — `test/control.test.ts:36`,
+  `test/registry.test.ts:22`, `test/turns.test.ts:14`,
+  `test/ui/subagent-list.test.ts:47`,
+  `test/ui/subagent-viewer.test.ts:111`, and three inline records in
+  `test/spawn.test.ts`.
+
+  Every test still passed: `vitest` transpiles through esbuild and does
+  not typecheck, so this surfaced only under `npx tsc --noEmit`. Worth
+  carrying into Slices 2 and 3 — a green suite is not evidence that the
+  types agree.
+
+- [x] **Task 1.6**: Mutation-test the slice.
 
   | Mutation                                          | Test that must fail            |
   | ------------------------------------------------- | ------------------------------ |
@@ -226,6 +259,17 @@ is one commit on `main`, made at the end of the turn that implements it.
   | Drop `config` from the record literal             | `startSubagent` carries config |
   | `?? record.config` appended to the file lookup    | file-is-gone refusal           |
   | Return the stored config for a `"project"` record | current-frontmatter resume     |
+
+  > [!NOTE]
+  > All four caught; no hollow test, which is the first time
+  > `mutate.py` has found nothing in this project.
+  >
+  > It had to be rewritten first, as the Prerequisites section
+  > expected. The rewrite checks each mutation twice — once unmutated,
+  > to prove the named test exists and passes, then once mutated, where
+  > it must fail. Without the first run a `-t` filter matching no test
+  > at all exits non-zero and reads as a mutation caught, which is the
+  > one way this script can lie.
 
 ### Slice 2: A character supplied at spawn time
 
@@ -593,6 +637,7 @@ is one commit on `main`, made at the end of the turn that implements it.
 | `test/index.test.ts`           | Inline spawn, refusals, listing                          |
 | `test/tool-boundary.test.ts`   | Inline spawn at the tool boundary                        |
 | `test/agents.test.ts`          | Only if a traced scenario proves thin                    |
+| 5 other test files             | A `config` on each record fixture (Task 1.5)             |
 | `README.md`                    | Both spawn routes; `list_subagents`                      |
 | `docs/adr/2026-08-23-*.md`     | Two ADRs, already written                                |
 

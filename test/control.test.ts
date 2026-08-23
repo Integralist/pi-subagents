@@ -37,6 +37,12 @@ function record(overrides: Partial<SubagentRecord> = {}): SubagentRecord {
 		id: "abc123",
 		handle: "explore",
 		type: "explore",
+		config: {
+			name: "explore",
+			description: "explores the codebase",
+			systemPrompt: "You explore.",
+			source: "project",
+		},
 		description: "look around",
 		status: "running",
 		color: "cyan",

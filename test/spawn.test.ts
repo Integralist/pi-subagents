@@ -185,6 +185,21 @@ describe("startSubagent", () => {
 	});
 
 	/**
+	 * The record is what a continuation reads when there is no agent file to
+	 * re-read, so the definition has to be on it rather than looked up again.
+	 */
+	it("keeps the definition it was started under on the record", () => {
+		const config = agentConfig({
+			systemPrompt: "You review code narrowly.",
+			tools: ["read", "grep"],
+		});
+
+		const { record } = start(run, send, { config });
+
+		expect(record.config).toEqual(config);
+	});
+
+	/**
 	 * A message sent to a subagent still waiting for a slot has nowhere to go
 	 * until the run starts, so it joins the task the run starts on. Its own
 	 * paragraph, rather than running into the end of the original task.
@@ -936,6 +951,7 @@ describe("resumeSubagent", () => {
 			id: "abc123",
 			handle: "reviewer",
 			type: "reviewer",
+			config: agentConfig(),
 			description: "review agents file",
 			status: "completed",
 			color: "cyan",
@@ -1164,6 +1180,7 @@ describe("stopFromUi", () => {
 			id: "abc123",
 			handle: "reviewer",
 			type: "reviewer",
+			config: agentConfig(),
 			description: "review agents file",
 			status: "running",
 			color: "cyan",
@@ -1227,6 +1244,7 @@ describe("stopFromUi", () => {
 			id: "abc123",
 			handle: "reviewer",
 			type: "reviewer",
+			config: agentConfig(),
 			description: "review agents file",
 			status: "queued",
 			color: "cyan",

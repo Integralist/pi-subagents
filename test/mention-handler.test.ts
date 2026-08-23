@@ -219,6 +219,88 @@ describe("the @name handler", () => {
 		});
 	});
 
+	/**
+	 * Where a subagent's character came from decides what a continuation runs
+	 * under. A file-backed one re-reads its file, so an edit to the frontmatter
+	 * takes effect; one given its character at spawn has no file to read, so its
+	 * record is the only definition there is.
+	 */
+	describe("continuing by where the character came from", () => {
+		// The specification's scenario, quoted.
+		it("Continues under the character it was given", async () => {
+			const record = spawned(
+				{
+					status: "completed",
+					outcome: { status: "completed", output: "no findings" },
+					sessionFile: __filename,
+				},
+				agentConfig({
+					name: "security",
+					source: "inline",
+					systemPrompt: "You are a security reviewer.",
+					tools: ["read", "grep"],
+					filePath: undefined,
+				}),
+			);
+			// Nothing on disk answers to this name, which is the whole point.
+			agents = [];
+			run.calls.length = 0;
+
+			await submit("@security look at the auth path again");
+
+			expect(run.calls[0]?.config.systemPrompt).toBe(
+				"You are a security reviewer.",
+			);
+			expect(run.calls[0]?.config.tools).toEqual(["read", "grep"]);
+			expect(registry.get(record.id)?.status).not.toBe("completed");
+			expect(lastNotice()).not.toMatch(/no agent file/i);
+		});
+
+		// The specification's scenario, quoted.
+		it("Reads the agent file again when there is one", async () => {
+			spawned({
+				status: "completed",
+				outcome: { status: "completed", output: "done" },
+				sessionFile: __filename,
+			});
+			// The file has been edited since the subagent ran.
+			agents = [
+				agentConfig({
+					systemPrompt: "You explore, sceptically.",
+					thinking: "high",
+				}),
+			];
+			run.calls.length = 0;
+
+			await submit("@explore look again");
+
+			expect(run.calls[0]?.config.systemPrompt).toBe(
+				"You explore, sceptically.",
+			);
+			expect(run.calls[0]?.thinkingLevel).toBe("high");
+		});
+
+		/**
+		 * The stored definition is not a fallback for a file-backed subagent. Its
+		 * file having gone means the agent is gone, and resuming it under the copy
+		 * it started with would quietly revive something the user deleted.
+		 */
+		it("does not fall back to the stored character when a file is expected", async () => {
+			spawned({
+				status: "completed",
+				outcome: { status: "completed", output: "done" },
+				sessionFile: __filename,
+			});
+			agents = [];
+			run.calls.length = 0;
+
+			await submit("@explore look again");
+
+			expect(run.calls).toHaveLength(0);
+			expect(lastNotice()).toMatch(/no agent file/i);
+		});
+	});
+
 	describe("text that is not a mention", () => {
 		// The specification's scenario, quoted.
 		it("Treats a bare handle as ordinary text", async () => {

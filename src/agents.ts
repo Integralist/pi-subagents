@@ -35,8 +35,16 @@ import {
 	parseFrontmatter,
 } from "@earendil-works/pi-coding-agent";
 
-/** Which of the three tiers an agent file came from. */
-export type AgentSource = "builtin" | "user" | "project";
+/**
+ * Which of the three tiers an agent file came from, or that it came from no
+ * file at all.
+ *
+ * `inline` is load-bearing rather than descriptive: continuing a subagent
+ * branches on it to decide whether to re-read a file or trust the definition
+ * stored on the record. Nothing in this module produces it — a definition
+ * supplied when a subagent is started does.
+ */
+export type AgentSource = "builtin" | "user" | "project" | "inline";
 
 export interface AgentConfig {
 	name: string;
@@ -48,7 +56,8 @@ export interface AgentConfig {
 	color?: string;
 	maxTurns?: number;
 	source: AgentSource;
-	filePath: string;
+	/** Absent for a definition supplied at spawn time, which has no file. */
+	filePath?: string;
 }
 
 /**

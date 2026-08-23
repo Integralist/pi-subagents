@@ -720,11 +720,21 @@ async function route(
 		return;
 	}
 
-	// Freshly read, so a continuation runs under the agent file as it is now —
-	// and so a file that has since been deleted is noticed rather than guessed at.
-	const config = record
-		? agents.find((agent) => agent.name === record.type)
-		: agentForHandle(agents, handle);
+	// A subagent given its definition when it was started has no file to read, so
+	// its record holds the only one there is.
+	//
+	// Everything else is freshly read, so a continuation runs under the agent
+	// file as it is now — and so a file that has since been deleted is noticed
+	// rather than guessed at. Deliberately branched on where the definition came
+	// from rather than on whether a file happens to be found: falling back to the
+	// record whenever the lookup missed would resume a deleted agent under the
+	// copy it started with, which is the opposite of noticing.
+	const config =
+		record?.config.source === "inline"
+			? record.config
+			: record
+				? agents.find((agent) => agent.name === record.type)
+				: agentForHandle(agents, handle);
 	if (!config) {
 		say(`There is no agent file for "${handle}" any more.`, "warning");
 		return;

@@ -11,6 +11,7 @@
  */
 
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { AgentConfig } from "./agents.ts";
 import type { SubagentOutcome } from "./runner.ts";
 
 /**
@@ -48,6 +49,23 @@ export interface SubagentRecord {
 	handle: string;
 	/** The agent definition this run came from. */
 	type: string;
+	/**
+	 * The definition this run was started under, kept so that continuing it does
+	 * not depend on a file still being there.
+	 *
+	 * A subagent given its definition when it was started has no file to re-read
+	 * and this is the only one it will ever have. A file-backed subagent carries
+	 * it too, but a continuation prefers the file — see `route` in `index.ts` for
+	 * why a resumed subagent runs under its file's current frontmatter, and why
+	 * this is not a fallback for a file that has gone.
+	 *
+	 * `type` stays alongside it because that is what the model addresses and what
+	 * every message names. The two cannot disagree: both are set from one
+	 * definition when the record is made, and a file whose `name:` has changed
+	 * since is no longer findable under the old one, so it is a different agent
+	 * rather than a renamed one.
+	 */
+	config: AgentConfig;
 	/** What the caller asked for, one line, for the list. */
 	description: string;
 	status: SubagentStatus;

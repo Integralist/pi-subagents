@@ -112,6 +112,12 @@ function record(overrides: Partial<SubagentRecord> = {}): SubagentRecord {
 		id: "abc123",
 		handle: "reviewer",
 		type: "reviewer",
+		config: {
+			name: "reviewer",
+			description: "reviews code for defects",
+			systemPrompt: "You review code.",
+			source: "project",
+		},
 		description: "review the queue",
 		status: "running",
 		color: "cyan",
