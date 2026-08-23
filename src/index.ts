@@ -188,13 +188,25 @@ async function chooseModel(
  * than describing an abstract capability.
  */
 export function buildToolDescription(agents: AgentConfig[]): string {
+	// How to name a subagent, wherever its character comes from. Stated in both
+	// branches because the naming rule is what keeps the user out of it, and a
+	// caller reading only the empty-project text would never see it.
+	const naming = [
+		"",
+		"To delegate to a character no agent file describes, supply",
+		"system_prompt with its instructions, a short one-word name, and",
+		"optionally tools to limit what it may use. Invent the name yourself —",
+		"a distinct one for each subagent you start — and never ask the user",
+		"for one.",
+	];
+
 	if (agents.length === 0) {
 		return [
-			"Delegate a task to a focused subagent.",
-			"There are no subagents defined for this project, so this tool",
-			"cannot be used yet. Define one as a Markdown file with YAML",
-			"frontmatter under .pi/agents/.",
-		].join(" ");
+			"Delegate a task to a focused subagent, which runs on its own and",
+			"returns a single answer. No agent files are defined for this",
+			"project, so every subagent here is one you describe yourself.",
+			...naming,
+		].join("\n");
 	}
 
 	const lines = agents.map(
@@ -205,6 +217,7 @@ export function buildToolDescription(agents: AgentConfig[]): string {
 		"returns a single answer. Available subagent types:",
 		"",
 		...lines,
+		...naming,
 	].join("\n");
 }
 
@@ -228,6 +241,93 @@ function checkToolNames(
 	const tools = requested.filter((name) => knownSet.has(name));
 	const unknownTools = requested.filter((name) => !knownSet.has(name));
 	return { tools: tools.length > 0 ? tools : undefined, unknownTools };
+}
+
+/**
+ * The spawn parameters that choosing a definition depends on.
+ *
+ * Declared structurally rather than taken from the schema: the schema is inline
+ * in `defineTool`, so there is no named type to derive from without lifting it
+ * out, and only these five fields matter here.
+ */
+interface SpawnRoute {
+	subagent_type?: string;
+	system_prompt?: string;
+	name?: string;
+	tools?: string[];
+	description: string;
+}
+
+/**
+ * The definition a spawn call asks for, by whichever of the two routes it took.
+ *
+ * A character comes from an agent file or from the call, never from both — the
+ * plain-schema rule leaves no way to say "one of these" in the schema itself,
+ * so this is the only place that rule lives. Each refusal names the way out,
+ * because a caller that cannot tell which field to drop will guess.
+ */
+export function resolveSpawnConfig(
+	params: SpawnRoute,
+	agents: AgentConfig[],
+): AgentConfig {
+	const supplied = params.system_prompt?.trim();
+	const type = params.subagent_type?.trim();
+
+	if (supplied && type) {
+		throw new Error(
+			"A subagent takes its character from an agent file or from " +
+				"system_prompt, not both. Drop subagent_type to use the prompt you " +
+				"supplied, or drop system_prompt to use the file.",
+		);
+	}
+
+	if (!supplied) {
+		if (!type) {
+			throw new Error(
+				"Name a subagent_type from the list, or supply a system_prompt " +
+					"describing the subagent you want.",
+			);
+		}
+
+		const config = agents.find((agent) => agent.name === type);
+		if (!config) {
+			// "Known types: ." is no help to a project that has none, and the way
+			// out of that case is the other route rather than a different name.
+			throw new Error(
+				agents.length === 0
+					? "No agent files are defined for this project, so there is no " +
+							`subagent type "${type}". Supply a system_prompt describing ` +
+							"the subagent you want instead."
+					: `Unknown subagent type "${type}". ` +
+							`Known types: ${agents.map((agent) => agent.name).join(", ")}.`,
+			);
+		}
+		return config;
+	}
+
+	// `assignHandle` slugs whatever it is given, so a name left out can fall
+	// back to the description without slugging anything here. The handle that
+	// yields is ugly — a description is three to five words — and that is the
+	// point: refusing would send the caller back to the user for a name, which
+	// is the one outcome this route exists to avoid.
+	const name = params.name?.trim() || params.description;
+
+	const shadowed = agents.find((agent) => agent.name === name);
+	if (shadowed) {
+		throw new Error(
+			`"${name}" is already an agent file (${shadowed.source}). Either name ` +
+				"it as subagent_type without a system_prompt to use that file, or " +
+				"choose a different name for the subagent you are describing.",
+		);
+	}
+
+	return {
+		name,
+		description: params.description,
+		systemPrompt: supplied,
+		tools: params.tools,
+		source: "inline",
+	};
 }
 
 /**
@@ -285,9 +385,38 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 		// Plain types and explicit fields only — no `anyOf` or conditional schema
 		// constructs, per the specification's provider-compatibility decision.
 		parameters: Type.Object({
-			subagent_type: Type.String({
-				description: "Name of the subagent to delegate to.",
-			}),
+			subagent_type: Type.Optional(
+				Type.String({
+					description:
+						"Name of the subagent to delegate to, from the list above. " +
+						"Omit it when supplying system_prompt instead.",
+				}),
+			),
+			system_prompt: Type.Optional(
+				Type.String({
+					description:
+						"Instructions defining this subagent's character, used instead " +
+						"of an agent file. Supply this when no listed subagent type " +
+						"fits the work; the subagent runs under it and nothing else.",
+				}),
+			),
+			name: Type.Optional(
+				Type.String({
+					description:
+						"A short one-word name for this subagent, which becomes the " +
+						"handle the user types after @ to reach it. Choose it " +
+						"yourself — a distinct one for each subagent you start — and " +
+						"never ask the user for one. Only read alongside " +
+						"system_prompt.",
+				}),
+			),
+			tools: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"The tools this subagent may use, by name. Defaults to the " +
+						"session's own tools. Only read alongside system_prompt.",
+				}),
+			),
 			prompt: Type.String({
 				description:
 					"The task for the subagent. It cannot see this conversation, so " +
@@ -330,23 +459,11 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 				);
 			}
 
+			// No guard on an empty agent list: a project with no agent files can
+			// still delegate by supplying a character, and `resolveSpawnConfig`
+			// refuses a call that does neither.
 			const agents = deps.discover(ctx.cwd);
-			if (agents.length === 0) {
-				throw new Error(
-					"There are no subagents defined for this project. Define one as a " +
-						"Markdown file with YAML frontmatter under .pi/agents/.",
-				);
-			}
-
-			const config = agents.find(
-				(agent) => agent.name === params.subagent_type,
-			);
-			if (!config) {
-				throw new Error(
-					`Unknown subagent type "${params.subagent_type}". ` +
-						`Known types: ${agents.map((agent) => agent.name).join(", ")}.`,
-				);
-			}
+			const config = resolveSpawnConfig(params, agents);
 
 			const { tools, unknownTools } = checkToolNames(
 				config.tools,

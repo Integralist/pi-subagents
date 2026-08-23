@@ -9,6 +9,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agents.ts";
+import { PALETTE } from "../src/colors.ts";
 import extension, {
 	buildToolDescription,
 	configuredLimit,
@@ -375,7 +376,26 @@ describe("buildToolDescription", () => {
 	});
 
 	it("says so plainly when no agents are defined", () => {
-		expect(buildToolDescription([])).toMatch(/no .*agents/i);
+		expect(buildToolDescription([])).toMatch(/no agent files/i);
+	});
+
+	/**
+	 * It used to say the tool "cannot be used yet" without agent files, which
+	 * stopped being true the moment a caller could supply a character of its own.
+	 */
+	it("offers the supplied-character route instead of calling itself unusable", () => {
+		const description = buildToolDescription([]);
+
+		expect(description).not.toMatch(/cannot be used/i);
+		expect(description).toContain("system_prompt");
+	});
+
+	/** The naming rule only works if the tool actually asks for a name. */
+	it("tells the caller to name each subagent itself", () => {
+		const description = buildToolDescription([agentConfig()]);
+
+		expect(description).toContain("system_prompt");
+		expect(description).toMatch(/never ask the user/i);
 	});
 });
 
@@ -523,12 +543,17 @@ describe("spawn_subagent", () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
+	/**
+	 * Naming a type in a project that has no agent files is still a refusal —
+	 * what changed is that the refusal points at the other route rather than
+	 * listing an empty set of known types.
+	 */
 	it("refuses clearly when no agents are defined at all", async () => {
 		const { tool, run } = harness({ agents: [] });
 
 		await expect(
 			tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx),
-		).rejects.toThrow(/no .*agents/i);
+		).rejects.toThrow(/no agent files/i);
 
 		expect(run).not.toHaveBeenCalled();
 	});
@@ -1104,6 +1129,190 @@ describe("spawn_subagent tool allowlist validation", () => {
 		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
 
 		expect(run.mock.calls[0]?.[0].config.tools).toBeUndefined();
+	});
+});
+
+describe("spawn_subagent with a supplied character", () => {
+	/** A persona the caller composed, rather than a type it looked up. */
+	const INLINE_ARGS = {
+		name: "security",
+		system_prompt: "You are a security reviewer.",
+		prompt: "check the auth path",
+		description: "security review",
+	};
+
+	// The specification's scenario, quoted.
+	it("Runs from the supplied character", async () => {
+		// The harness offers "reviewer" and nothing else, so a run under the
+		// supplied prompt is a run no agent file took part in.
+		const { tool, run } = harness();
+
+		await tool.execute("call-1", INLINE_ARGS, undefined, undefined, ctx);
+
+		const config = run.mock.calls[0]?.[0].config;
+		expect(config.systemPrompt).toBe("You are a security reviewer.");
+		expect(config.name).toBe("security");
+		expect(config.source).toBe("inline");
+		expect(config.filePath).toBeUndefined();
+	});
+
+	// The specification's scenario, quoted.
+	it("Needs no agent file of that name", async () => {
+		const { tool, run, registry } = harness({
+			agents: [agentConfig({ name: "reviewer" })],
+		});
+
+		await tool.execute(
+			"call-1",
+			{ ...INLINE_ARGS, name: "performance-analyst" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run).toHaveBeenCalledOnce();
+		expect(registry.get("sub-1")?.handle).toBe("performance-analyst");
+	});
+
+	// The specification's scenario, quoted.
+	it("Limits it to the tools named", async () => {
+		const { tool, run } = harness({ knownTools: ["read", "grep", "bash"] });
+
+		await tool.execute(
+			"call-1",
+			{ ...INLINE_ARGS, tools: ["read", "grep"] },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run.mock.calls[0]?.[0].config.tools).toEqual(["read", "grep"]);
+	});
+
+	// The specification's scenario, quoted.
+	it("Takes the supplied name as its handle", async () => {
+		const { tool, registry } = harness();
+
+		await tool.execute("call-1", INLINE_ARGS, undefined, undefined, ctx);
+
+		expect(registry.get("sub-1")?.handle).toBe("security");
+	});
+
+	/**
+	 * The specification's scenario, quoted. Ugly on purpose: refusing would send
+	 * the caller back to the user for a name, which is the thing being avoided.
+	 */
+	it("Falls back to the description when no name is supplied", async () => {
+		const { tool, run, registry } = harness();
+		const { name: _unnamed, ...withoutName } = INLINE_ARGS;
+
+		await tool.execute("call-1", withoutName, undefined, undefined, ctx);
+
+		expect(run).toHaveBeenCalledOnce();
+		expect(registry.get("sub-1")?.handle).toBe("security-review");
+	});
+
+	// The specification's scenario, quoted.
+	it("Distinguishes subagents given the same name", async () => {
+		const { tool, registry } = harness({ hang: true });
+
+		for (let n = 1; n <= 5; n++) {
+			await tool.execute(`call-${n}`, INLINE_ARGS, undefined, undefined, ctx);
+		}
+
+		const handles = registry.list().map((record) => record.handle);
+		expect(handles).toHaveLength(5);
+		expect(new Set(handles).size).toBe(5);
+		expect(handles[0]).toBe("security");
+	});
+
+	// The specification's scenario, quoted.
+	it("Refuses a name an agent file already uses", async () => {
+		const { tool, run, registry } = harness({
+			agents: [agentConfig({ name: "security" })],
+		});
+
+		// Named for the collision itself, not merely for the name: an "unknown
+		// type" refusal also mentions "security", and would pass a looser match
+		// while saying something quite different.
+		await expect(
+			tool.execute("call-1", INLINE_ARGS, undefined, undefined, ctx),
+		).rejects.toThrow(/already an agent file/i);
+
+		expect(run).not.toHaveBeenCalled();
+		expect(registry.list()).toHaveLength(0);
+	});
+
+	/**
+	 * Not a specification scenario but the schema's own gap: the two routes are
+	 * mutually exclusive and plain types cannot say so, so the refusal is the
+	 * only place that rule lives.
+	 */
+	it("refuses a call that names a type and supplies a character", async () => {
+		const { tool, run } = harness();
+
+		await expect(
+			tool.execute(
+				"call-1",
+				{ ...INLINE_ARGS, subagent_type: "reviewer" },
+				undefined,
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow(/both|not both/i);
+
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("refuses a call that neither names a type nor supplies a character", async () => {
+		const { tool, run } = harness();
+
+		await expect(
+			tool.execute(
+				"call-1",
+				{ prompt: "check the auth path", description: "security review" },
+				undefined,
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow(/subagent_type|system_prompt/);
+
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// The specification's scenario, quoted.
+	it("Gives it a colour from the palette", async () => {
+		const { tool, registry } = harness();
+
+		await tool.execute("call-1", INLINE_ARGS, undefined, undefined, ctx);
+
+		expect(PALETTE).toContain(registry.get("sub-1")?.color);
+	});
+
+	// The specification's scenario, quoted.
+	it("Refuses to start a subagent from inside a subagent", async () => {
+		const { tool, run } = harness();
+
+		await runInChildContext(async () => {
+			await expect(
+				tool.execute("call-1", INLINE_ARGS, undefined, undefined, ctx),
+			).rejects.toThrow(/subagent/i);
+		});
+
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	/**
+	 * The case that makes the old refusal wrong. A project with no agent files
+	 * could not delegate at all; supplying a character is now how it does.
+	 */
+	it("works in a project with no agent files at all", async () => {
+		const { tool, run, registry } = harness({ agents: [] });
+
+		await tool.execute("call-1", INLINE_ARGS, undefined, undefined, ctx);
+
+		expect(run).toHaveBeenCalledOnce();
+		expect(registry.get("sub-1")?.handle).toBe("security");
 	});
 });
 

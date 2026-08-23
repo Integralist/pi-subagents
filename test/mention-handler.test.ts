@@ -5,7 +5,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agents.ts";
-import { createMentionHandler } from "../src/index.ts";
+import { createMentionHandler, createSpawnTool } from "../src/index.ts";
 import { SubagentQueue } from "../src/queue.ts";
 import { type SubagentRecord, SubagentRegistry } from "../src/registry.ts";
 import type { RunSubagentOptions, SubagentOutcome } from "../src/runner.ts";
@@ -278,6 +278,56 @@ describe("the @name handler", () => {
 				"You explore, sceptically.",
 			);
 			expect(run.calls[0]?.thinkingLevel).toBe("high");
+		});
+
+		/**
+		 * The two halves of the feature, joined.
+		 *
+		 * Every other test here builds its own record, so each half can be right
+		 * while the pair is broken: the spawn tool could stop marking a supplied
+		 * character as inline and nothing above would notice. This is the only
+		 * test that starts a subagent the way a skill really does and then
+		 * reaches it the way a user really does.
+		 */
+		it("reaches a subagent the spawn tool gave its character", async () => {
+			const spawn = createSpawnTool({
+				discover: () => agents,
+				run: run.run,
+				getKnownTools: () => ["read", "grep"],
+				registry,
+				queue,
+				sendMessage: sendMessage as unknown as SendMessage,
+				newId: () => "sub-1",
+			});
+			await spawn.execute(
+				"call-1",
+				{
+					name: "security",
+					system_prompt: "You are a security reviewer.",
+					tools: ["read", "grep"],
+					prompt: "check the auth path",
+					description: "security review",
+				},
+				undefined,
+				undefined,
+				context(),
+			);
+			// Finished, so the mention continues it rather than steering it. Nothing
+			// on disk is called "security", so only the record can answer.
+			registry.update("sub-1", {
+				status: "completed",
+				outcome: { status: "completed", output: "no findings" },
+				sessionFile: __filename,
+			});
+			run.calls.length = 0;
+
+			await submit("@security and now the session path");
+
+			expect(run.calls[0]?.config.systemPrompt).toBe(
+				"You are a security reviewer.",
+			);
+			expect(run.calls[0]?.config.tools).toEqual(["read", "grep"]);
+			expect(lastNotice()).not.toMatch(/no agent file/i);
 		});
 
 		/**

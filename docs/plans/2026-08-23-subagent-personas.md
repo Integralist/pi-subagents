@@ -288,7 +288,7 @@ is one commit on `main`, made at the end of the turn that implements it.
 - **Produces**: No new exported signature. `buildToolDescription`
   (`src/index.ts:190`) changes behaviour for an empty agent list.
 
-- [ ] **Task 2.1**: Add the three parameters, and make `subagent_type`
+- [x] **Task 2.1**: Add the three parameters, and make `subagent_type`
   optional.
 
   `subagent_type` is required today (`src/index.ts:288`). A supplied
@@ -332,7 +332,7 @@ is one commit on `main`, made at the end of the turn that implements it.
   ),
   ```
 
-- [ ] **Task 2.2**: Resolve the definition from whichever route the call
+- [x] **Task 2.2**: Resolve the definition from whichever route the call
   took.
 
   Four cases, each with its own refusal. The collision check is what
@@ -421,7 +421,7 @@ is one commit on `main`, made at the end of the turn that implements it.
   falls to `DEFAULT_MAX_TURNS` (`src/spawn.ts:172-174`). Both are
   covered by a test rather than by new code.
 
-- [ ] **Task 2.3**: Stop claiming the tool is unusable without agent
+- [x] **Task 2.3**: Stop claiming the tool is unusable without agent
   files.
 
   `buildToolDescription([])` currently says the tool "cannot be used
@@ -431,7 +431,23 @@ is one commit on `main`, made at the end of the turn that implements it.
   inline path's plain case rather than an error. Delete the throw, and
   give the description the naming directive in both branches.
 
-- [ ] **Task 2.4**: Tests at the tool boundary.
+  > [!NOTE]
+  > Deleting the throw outright lost a message worth keeping. An
+  > existing test — "refuses clearly when no agents are defined at all"
+  > — names a type in a project with no agent files, and that must still
+  > be refused; without the throw it fell through to the generic
+  > `Unknown subagent type` refusal, which in a project with no agent
+  > files lists nothing and suggests nothing.
+  > `resolveSpawnConfig` now special-cases an empty agent list and
+  > points at `system_prompt` instead.
+  >
+  > Two existing assertions moved from `/no .*agents/i` to
+  > `/no agent files/i`. The wording changed on purpose: with a
+  > supplied character a subagent need not come from a file, so "no
+  > agents are defined" had become untrue where "no agent files are
+  > defined" is exact.
+
+- [x] **Task 2.4**: Tests at the tool boundary.
 
   Ten cases, from the spec's "Starting a subagent with a supplied
   character" feature, plus the two refusals the schema cannot express:
@@ -448,16 +464,56 @@ is one commit on `main`, made at the end of the turn that implements it.
   - takes a palette colour
   - the recursion guard still refuses, with `system_prompt` supplied
   - works in a project with no agent files at all
+  - the tool description asks the caller to name subagents itself, and
+    no longer calls itself unusable without agent files
 
-- [ ] **Task 2.5**: Mutation-test the slice.
+  > [!NOTE]
+  > One of these passed the moment it was written, for the wrong
+  > reason. "Refuses a name an agent file already uses" matched
+  > `/security/`, and the *old* code refused it too — with an
+  > `Unknown subagent type` message that happened to list `security`
+  > among the known types, mentioning the same word while saying
+  > something entirely different. Tightened to
+  > `/already an agent file/i`, which only the collision can produce.
+  >
+  > Three others asserted `status === "running"` after a spawn. The
+  > harness's default runner resolves immediately, so the status was
+  > already `completed` — the tests were wrong, not the code. They now
+  > assert on the handle and on the runner having been called, which is
+  > what each was really about.
+
+- [x] **Task 2.5**: Add the test that joins the two halves.
+
+  Found by mutation testing, not by reading. Every test in Slices 1 and
+  2 builds its own fixture on one side of the boundary, so both halves
+  can be right while the pair is broken: the spawn tool could stop
+  marking a supplied character as `"inline"` and no continuation test
+  would notice, because each builds its own record.
+
+  One test in `test/mention-handler.test.ts` now starts a subagent
+  through the real spawn tool, sharing the handler's registry, then
+  reaches it by `@handle` with nothing on disk under that name — a
+  skill's real path through the feature, and the only test that fails
+  when the halves disagree.
+
+- [x] **Task 2.6**: Mutation-test the slice.
 
   | Mutation                                                            | Test that must fail      |
   | ------------------------------------------------------------------- | ------------------------ |
   | Remove the collision check                                          | refuses a shadowing name |
   | `params.name?.trim() \|\| params.description` → `params.name ?? ""` | description fallback     |
-  | `source: "inline"` → `source: "project"`                            | Slice 1's inline resume  |
+  | `source: "inline"` → `source: "project"`                            | the joined test, 2.5     |
   | Drop `tools` from the returned config                               | tools restriction        |
   | Allow both routes together                                          | refuses both-given       |
+  | Stop refusing a call that takes neither route                       | refuses neither-given    |
+
+  > [!NOTE]
+  > All six caught, but only after the third was repointed. It was
+  > written against Slice 1's inline-resume test on the assumption that
+  > the two slices were linked; they were not, and the mutation
+  > survived. That survival is what produced Task 2.5 — the most useful
+  > thing mutation testing has found in this project so far, because it
+  > exposed a missing test rather than a weak assertion.
 
 ### Slice 3: `list_subagents`
 
@@ -632,6 +688,7 @@ is one commit on `main`, made at the end of the turn that implements it.
 | `src/registry.ts`              | `SubagentRecord.config`                                  |
 | `src/spawn.ts`                 | The record stores its config                             |
 | `src/index.ts`                 | Spawn parameters, `resolveSpawnConfig`, `createListTool` |
+| `test/index.test.ts`           | Inline spawn, its refusals, tool description             |
 | `test/mention-handler.test.ts` | Continuation by character origin                         |
 | `test/spawn.test.ts`           | The record carries its config                            |
 | `test/index.test.ts`           | Inline spawn, refusals, listing                          |
