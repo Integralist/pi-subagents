@@ -270,10 +270,14 @@ describe("Feature: Reading a subagent result back", () => {
 		expect(resultText(result)).toContain("two defects found");
 	});
 
-	// The plan's acceptance criterion for Task 3.5, quoted.
-	// The specification's scenario, quoted: the reply says it is still
-	// running, and no output text is returned.
-	it("Reports a running subagent as unfinished", async () => {
+	/**
+	 * The tool waits for a running subagent rather than reporting "not yet", so
+	 * the thing worth proving at this seam is that the wait always ends: an
+	 * abandoned turn must not leave a tool call holding a subagent that will
+	 * never answer. The waiting itself is exercised in `index.test.ts`, where
+	 * the run can be finished on demand.
+	 */
+	it("gives up waiting on a running subagent when the turn is abandoned", async () => {
 		const hanging = vi.fn(
 			() => new Promise<never>(() => {}),
 		) as unknown as () => Promise<never>;
@@ -290,16 +294,19 @@ describe("Feature: Reading a subagent result back", () => {
 		const resultTool = createResultTool({ registry });
 
 		await spawn.execute("call-1", ARGS, undefined, undefined, ctx);
-		const result = await resultTool.execute(
+		const turn = new AbortController();
+		const pending = resultTool.execute(
 			"call-2",
 			{ id: "sub-1" },
-			undefined,
+			turn.signal,
 			undefined,
 			ctx,
 		);
+		turn.abort();
+		const result = await pending;
 
 		expect(resultText(result)).toMatch(/still working/i);
-		expect(resultText(result)).not.toMatch(/finished/i);
+		expect(resultText(result)).not.toMatch(/finished\./i);
 	});
 
 	it("refuses an id it has never issued", async () => {

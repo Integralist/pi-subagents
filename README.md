@@ -71,7 +71,7 @@ That is the four checks this repository holds itself to:
 
 | Target            | What it does                                     |
 | ----------------- | ------------------------------------------------ |
-| `make test`       | 567 tests under `vitest`                         |
+| `make test`       | 577 tests under `vitest`                         |
 | `make typecheck`  | `tsc --noEmit`                                   |
 | `make lint`       | `biome check src test`                           |
 | `make load-check` | loads the extension through pi's own jiti loader |
@@ -215,7 +215,11 @@ an agent file set.
 
 `spawn_subagent` returns as soon as the subagent is under way; the answer
 arrives in the conversation on its own when it is done, so the main model can
-carry on meanwhile. `get_subagent_result` reads that answer back on demand.
+carry on meanwhile. `get_subagent_result` reads that answer back on demand, and
+waits for it when the subagent is still working — one call rather than a loop
+of "is it done yet", each of which would cost a whole turn. It gives up if the
+turn is abandoned, and after ten minutes regardless; the answer still arrives on
+its own afterwards. An answer handed to a waiting call is not announced twice.
 `steer_subagent` redirects one mid-run — a subagent still waiting for a slot
 takes the message into the task it starts on. `stop_subagent` halts one and
 keeps whatever it had worked out.

@@ -317,9 +317,18 @@ async function runAndAnnounce(
 			},
 		});
 
+		// Read before the update, because the update is what wakes a waiting
+		// caller: told the answer has landed, it lets go of its claim at once, so
+		// asking afterwards would always find nobody waiting.
+		const awaited = registry.isAwaited(record.id);
 		registry.update(record.id, { status: outcome.status, outcome });
 
-		announce(record, outcome, sendMessage);
+		// A caller waiting on `get_subagent_result` is handed this answer as its
+		// tool result. Announcing it as well would put the same text into the
+		// conversation twice.
+		if (!awaited) {
+			announce(record, outcome, sendMessage);
+		}
 	} catch {
 		// Nothing left to tell, and nobody to tell it to. The record already
 		// carries whatever was known before this went wrong.

@@ -886,6 +886,18 @@ That has a direct consequence for how the work is handed out.
   > `SubagentRegistry` created in the extension factory. The tool
   > description tells the model its answer will arrive on its own, so
   > this is not turned into a polling loop.
+  >
+  > **Superseded 2026-08-23, after the first live run.** Telling the
+  > model not to poll did not stop it polling: with three subagents
+  > running and nothing else to do, it called this tool and
+  > `list_subagents` over and over, each call re-sending the whole
+  > conversation to the provider. The tool now waits for a running
+  > subagent instead of reporting that it is running — ended by the
+  > subagent finishing, by the turn being abandoned, or by a ten-minute
+  > cap — and an answer handed to a waiting call is not also announced,
+  > so it reaches the conversation once. Both this tool and
+  > `list_subagents` also draw their results as a single line unless the
+  > user expands them, which is the part waiting cannot fix.
 
 - [x] **Task 3.6**: Tests at the tool boundary.
 

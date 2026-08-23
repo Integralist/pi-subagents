@@ -5,6 +5,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	Theme,
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +15,7 @@ import extension, {
 	buildToolDescription,
 	configuredLimit,
 	createListTool,
+	createResultTool,
 	createSpawnTool,
 	LIST_TOOL_NAME,
 	RESULT_TOOL_NAME,
@@ -132,6 +134,8 @@ interface Harness {
 	sendMessage: ReturnType<typeof vi.fn>;
 	/** Resolves once the completion notice has been delivered. */
 	delivered: Promise<void>;
+	/** Ends a deferred run. Only meaningful with `defer`. */
+	finish: (outcome: SubagentOutcome) => void;
 }
 
 /**
@@ -147,17 +151,24 @@ function harness(
 		outcome?: SubagentOutcome;
 		/** A run that never finishes, so waiting on it would hang the test. */
 		hang?: boolean;
+		/** A run the test finishes itself, by calling `finish`. */
+		defer?: boolean;
 		/** How many subagents may run at once. Generous unless a test says so. */
 		limit?: number;
 	} = {},
 ): Harness {
 	const discover = vi.fn(() => options.agents ?? [agentConfig()]);
-	const run = vi.fn(
-		async (): Promise<SubagentOutcome> =>
-			options.hang
-				? new Promise<SubagentOutcome>(() => {})
-				: (options.outcome ?? { status: "completed", output: "looks fine" }),
-	);
+	let settleRun: ((outcome: SubagentOutcome) => void) | undefined;
+	const run = vi.fn(async (): Promise<SubagentOutcome> => {
+		if (options.defer) {
+			return new Promise<SubagentOutcome>((resolve) => {
+				settleRun = resolve;
+			});
+		}
+		return options.hang
+			? new Promise<SubagentOutcome>(() => {})
+			: (options.outcome ?? { status: "completed", output: "looks fine" });
+	});
 
 	let arrived!: () => void;
 	const delivered = new Promise<void>((resolve) => {
@@ -183,8 +194,25 @@ function harness(
 			return `sub-${issued}`;
 		},
 	});
-	return { tool, run, discover, registry, queue, sendMessage, delivered };
+	return {
+		tool,
+		run,
+		discover,
+		registry,
+		queue,
+		sendMessage,
+		delivered,
+		finish: (outcome) => {
+			if (!settleRun) {
+				throw new Error("no deferred run to finish");
+			}
+			settleRun(outcome);
+		},
+	};
 }
+
+/** Let whatever a call started settle before asserting on it. */
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 /** The text of the completion notice the harness captured. */
 function noticeText(sendMessage: ReturnType<typeof vi.fn>): string {
@@ -1383,6 +1411,154 @@ describe("spawn_subagent with a supplied character", () => {
 	});
 });
 
+/**
+ * The polling loop this replaced: the main model, with nothing else to do,
+ * asked "is it done yet" every turn — each one re-sending the whole
+ * conversation to the provider. Waiting turns that loop into one call.
+ */
+describe("get_subagent_result waiting for an answer", () => {
+	function waiting(options: { waitMs?: number } = {}) {
+		const started = harness({ defer: true });
+		return {
+			...started,
+			resultTool: createResultTool({
+				registry: started.registry,
+				...(options.waitMs === undefined ? {} : { waitMs: options.waitMs }),
+			}),
+		};
+	}
+
+	/** Start one deferred subagent and ask for its result, without waiting. */
+	async function asking(options: { waitMs?: number } = {}) {
+		const started = waiting(options);
+		await started.tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+		return started;
+	}
+
+	// The specification's scenario, quoted.
+	it("Waits for a running subagent and answers when it finishes", async () => {
+		const { resultTool, finish } = await asking();
+
+		const pending = resultTool.execute(
+			"call-2",
+			{ id: "sub-1" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		let answered = false;
+		void pending.then(() => {
+			answered = true;
+		});
+		await settle();
+		// Still holding: an answer here would be the old poll-and-return, and
+		// the model would be straight back with the same question.
+		expect(answered).toBe(false);
+
+		finish({ status: "completed", output: "two defects found" });
+
+		expect(resultText(await pending)).toContain("two defects found");
+	});
+
+	// The specification's scenario, quoted.
+	it("Gives up waiting when the turn is abandoned", async () => {
+		const { resultTool } = await asking();
+		const turn = new AbortController();
+
+		const pending = resultTool.execute(
+			"call-2",
+			{ id: "sub-1" },
+			turn.signal,
+			undefined,
+			ctx,
+		);
+		turn.abort();
+
+		expect(resultText(await pending)).toMatch(/still working/i);
+	});
+
+	// The specification's scenario, quoted.
+	it("Gives up waiting after its own cap", async () => {
+		const { resultTool } = await asking({ waitMs: 5 });
+
+		const result = await resultTool.execute(
+			"call-2",
+			{ id: "sub-1" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(resultText(result)).toMatch(/still working/i);
+	});
+
+	it("answers at once for a subagent that has already finished", async () => {
+		const { tool, registry, delivered } = harness();
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+		await delivered;
+
+		const result = await createResultTool({ registry }).execute(
+			"call-2",
+			{ id: "sub-1" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(resultText(result)).toContain("looks fine");
+	});
+
+	/**
+	 * The answer reaches the model once. Delivering it as a follow-up as well
+	 * would put the same text in the conversation twice — which is the cost
+	 * this slice is about.
+	 */
+	it("Does not also announce an answer that was waited for", async () => {
+		const { resultTool, finish, sendMessage } = await asking();
+
+		const pending = resultTool.execute(
+			"call-2",
+			{ id: "sub-1" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		finish({ status: "completed", output: "two defects found" });
+		await pending;
+
+		expect(sendMessage).not.toHaveBeenCalled();
+	});
+
+	/** The other half: nobody waiting means the notice is the only delivery. */
+	it("announces an answer nobody was waiting for", async () => {
+		const { finish, sendMessage, delivered } = await asking();
+
+		finish({ status: "completed", output: "two defects found" });
+		await delivered;
+
+		expect(sendMessage).toHaveBeenCalledOnce();
+	});
+
+	/** A wait that was given up on is not a wait, so the notice still comes. */
+	it("announces an answer whose waiter had already given up", async () => {
+		const { resultTool, finish, sendMessage, delivered } = await asking({
+			waitMs: 5,
+		});
+
+		await resultTool.execute(
+			"call-2",
+			{ id: "sub-1" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		finish({ status: "completed", output: "two defects found" });
+		await delivered;
+
+		expect(sendMessage).toHaveBeenCalledOnce();
+	});
+});
+
 describe("list_subagents", () => {
 	/**
 	 * Records built directly rather than spawned: this tool reads the registry
@@ -1548,5 +1724,93 @@ describe("configuredLimit", () => {
 		writeFileSync(notADirectory, "");
 
 		expect(configuredLimit(cwd, notADirectory)).toBe(DEFAULT_CONCURRENCY);
+	});
+});
+
+/**
+ * The other half of the polling problem, and the half waiting does not solve:
+ * a model that asks what is outstanding several times a turn fills the
+ * conversation with boxes nobody is reading. The text the model gets is
+ * untouched — this is only how much of it is drawn.
+ */
+describe("compact tool results", () => {
+	const plainTheme = {
+		fg: (_color: string, text: string) => text,
+	} as unknown as Theme;
+
+	/** The render context carries only what a renderer that ignores it needs. */
+	const renderContext = {} as never;
+
+	function draw(
+		tool: ToolDefinition,
+		result: { content: Array<{ type: string }> },
+		expanded: boolean,
+	): string[] {
+		const component = tool.renderResult?.(
+			result as never,
+			{ expanded, isPartial: false },
+			plainTheme,
+			renderContext,
+		);
+		if (!component) {
+			throw new Error("the tool draws its result no differently");
+		}
+		return component.render(60).map((line) => line.trim());
+	}
+
+	async function listResult() {
+		const registry = new SubagentRegistry();
+		for (const [index, status] of (
+			["running", "running", "completed"] as const
+		).entries()) {
+			registry.add({
+				id: `sub-${index + 1}`,
+				handle: `agent-${index + 1}`,
+				type: "reviewer",
+				config: agentConfig(),
+				description: "review agents file",
+				status,
+				color: "cyan",
+				startedAt: 1_000 + index,
+				contextPercent: null,
+				turns: 0,
+			});
+		}
+		const tool = createListTool({ registry });
+		return {
+			tool,
+			result: await tool.execute("call-1", {}, undefined, undefined, ctx),
+		};
+	}
+
+	it("draws a list of subagents as one line", async () => {
+		const { tool, result } = await listResult();
+
+		expect(draw(tool, result, false)).toEqual([
+			"3 subagents · 2 running · 1 completed",
+		]);
+	});
+
+	it("draws the whole list when it is expanded", async () => {
+		const { tool, result } = await listResult();
+
+		expect(draw(tool, result, true).join("\n")).toContain("agent-1");
+	});
+
+	it("draws a subagent's answer as one line", async () => {
+		const { tool, registry, delivered } = harness();
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+		await delivered;
+		const resultTool = createResultTool({ registry });
+		const result = await resultTool.execute(
+			"call-2",
+			{ id: "sub-1" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(draw(resultTool, result, false)).toEqual(["reviewer — completed"]);
+		expect(draw(resultTool, result, true).join("\n")).toContain("looks fine");
 	});
 });

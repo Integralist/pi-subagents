@@ -47,6 +47,19 @@ description. It is read-only and adds no state to the record.
   to agree with the concurrency queue (what if a slot never frees?),
   with the turn limit, and with cancellation. It trades a small
   read-only tool for a blocking one with several ways to hang.
+
+  > [!NOTE]
+  > Half-reversed 2026-08-23, after the first live run. Waiting is now
+  > what `get_subagent_result` does for one id: a subagent still
+  > working holds the call until it finishes. The rejection reasoning
+  > was about the failure modes of a call that does not return, and
+  > those are answered rather than avoided — the turn's own signal ends
+  > a wait, a ten-minute cap ends one regardless, and a wait that ends
+  > early is a tool result saying the subagent is still working, which
+  > is exactly what the call used to return immediately. What is *not*
+  > reversed is `wait_for` itself: no parameter names a set of ids, and
+  > waiting on several still means waiting on them one at a time or
+  > reading `list_subagents`.
 - **Batching the completion notices** — hold a finished subagent's
   notice briefly to see whether others land, then deliver one message.
   Rejected because it is a timing guess: two finishing together and
@@ -67,6 +80,13 @@ Unchanged: the wake count. Five subagents still wake the main model
 five times. This decision addresses what the model can *know* on each
 wakeup, not how often it is woken — batching was the option that would
 have addressed that, and it was rejected.
+
+> [!NOTE]
+> Amended 2026-08-23. The wake count is now four in that example, and
+> fewer still in the case this was written for: a subagent whose answer
+> is handed to a waiting `get_subagent_result` call is not announced as
+> well, because the model has already been given it. The wakeups that
+> remain are the ones nobody asked for, which is what a wakeup is for.
 
 This amends the [tool-naming ADR](2026-08-22-self-describing-tool-names.md),
 whose decision was four registered tools. It is now five, under the

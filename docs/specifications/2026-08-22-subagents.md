@@ -231,11 +231,29 @@ Feature: Steering, stopping, and collecting
     When its result is requested
     Then the full output text is returned
 
-  Scenario: Reports a running subagent as unfinished
+  Scenario: Waits for a running subagent and answers when it finishes
     Given a running subagent
     When its result is requested
-    Then the reply says the subagent is still running
-    And no output text is returned
+    Then the request does not answer while the subagent works
+    And it returns the output as soon as the subagent finishes
+
+  Scenario: Gives up waiting when the turn is abandoned
+    Given a running subagent
+    And its result has been requested
+    When the turn is abandoned
+    Then the reply says the subagent is still working
+
+  Scenario: Gives up waiting after its own cap
+    Given a running subagent
+    When its result is requested
+    And the subagent has not finished within the time the request waits
+    Then the reply says the subagent is still working
+
+  Scenario: Does not also announce an answer that was waited for
+    Given a running subagent whose result has been requested
+    When the subagent finishes
+    Then its answer is returned to the request
+    And no completion notice is delivered for it
 
 Feature: Keeping a subagent's conversation
   As a developer
@@ -650,6 +668,21 @@ tool Pi does not have, or names a model that would refuse the spawn.
   the registry already holds. It exists because the user can see
   this list in the interface and the main agent cannot, so a skill
   collecting several results has no way to ask what is outstanding.
+- **Asking for a result waits for it.** A request for a subagent that
+  is still working does not answer until the subagent finishes, so a
+  main agent with nothing else to do spends one turn rather than one
+  turn per question. Three things end a wait: the subagent finishing,
+  the turn being abandoned, and a cap the request holds itself to. An
+  answer handed back this way is not also announced as a completion
+  notice, or the same text reaches the conversation twice.
+
+> [!NOTE]
+> Amended 2026-08-23, after the first live run. Reporting "still
+> working" and returning was what the specification asked for, and
+> what the model did with it was ask again, and again, and again —
+> each question re-sending the whole conversation to the provider. The
+> notice arriving on its own is still the ordinary path; waiting is
+> for the caller that has run out of other work.
 - **No neutral agent files are shipped.** A character supplied at
   spawn time already carries its own prompt and tools, so a
   general-purpose file to specialise through the prompt would be a

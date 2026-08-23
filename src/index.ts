@@ -7,9 +7,10 @@
  * defined under `.pi/agents/` or a character to run under, and returns that id
  * straight away — the subagent then works in the background and its answer
  * arrives in the conversation on its own. `get_subagent_result` reads that
- * answer back on demand, for a caller that would rather ask than wait to be
- * told. `steer_subagent` redirects one mid-run, and `stop_subagent` halts one
- * while keeping whatever it had worked out.
+ * answer back on demand, waiting for it when the subagent is still working, so
+ * that a caller with nothing else to do asks once rather than repeatedly.
+ * `steer_subagent` redirects one mid-run, and `stop_subagent` halts one while
+ * keeping whatever it had worked out.
  *
  * `list_subagents` is the exception, taking no id: it reports every subagent in
  * the session, for a caller holding several at once that needs to know which
@@ -26,7 +27,10 @@ import {
 	type InputEvent,
 	type InputEventResult,
 	SettingsManager,
+	type Theme,
+	type ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
+import { type Component, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, discoverAgents } from "./agents.ts";
 import { steerSubagent, stopSubagent } from "./control.ts";
@@ -37,6 +41,7 @@ import {
 	type SubagentRecord,
 	SubagentRegistry,
 	TERMINAL_STATUSES,
+	whenFinished,
 } from "./registry.ts";
 import { describeCause, inChildContext, runSubagent } from "./runner.ts";
 import {
@@ -58,6 +63,16 @@ export const RESULT_TOOL_NAME = "get_subagent_result";
 export const STEER_TOOL_NAME = "steer_subagent";
 export const STOP_TOOL_NAME = "stop_subagent";
 export const LIST_TOOL_NAME = "list_subagents";
+
+/**
+ * How long one `get_subagent_result` call waits before it gives up.
+ *
+ * Long enough that an ordinary subagent is answered inside one call, short
+ * enough that a subagent whose provider has stopped answering does not hold a
+ * turn open all afternoon. Giving up is not losing the answer: the notice still
+ * arrives when the subagent finishes.
+ */
+const MAX_WAIT_MS = 10 * 60_000;
 
 /** Identifies the list widget to pi, so remounting replaces it rather than
  * stacking a second copy below the first. */
@@ -402,9 +417,10 @@ function describeStart(
 					"for one of the running subagents to finish. It will start on its " +
 					"own, and its result will arrive here when it is done."
 			: `Subagent "${record.type}" started with id ${record.id}. It runs in ` +
-					"the background and its result will arrive here on its own. Carry " +
-					`on with other work; call ${RESULT_TOOL_NAME} with that id to read ` +
-					"the result before then.",
+					"the background and its result will arrive here on its own, so " +
+					"carry on with other work. With none left to do, call " +
+					`${RESULT_TOOL_NAME} with that id once: it waits for the answer ` +
+					"and hands it back.",
 	);
 
 	return parts.join("\n\n");
@@ -612,34 +628,56 @@ function controlDetails(record: SubagentRecord): ControlDetails {
 }
 
 /**
- * Reading a subagent's answer back on demand.
+ * Reading a subagent's answer back on demand, waiting for it if it is not
+ * there yet.
  *
  * The answer arrives on its own when the subagent finishes, so this exists for
  * the model that wants it sooner, or that has been handed an id and no longer
  * has the notice in view.
+ *
+ * Waiting rather than reporting "not yet" is what the first live run bought:
+ * a model with nothing else to do asked the same question every turn, and each
+ * of those turns re-sent the whole conversation to the provider. One call that
+ * settles when there is something to say costs one turn instead of ten.
  */
-export function createResultTool(deps: { registry: SubagentRegistry }) {
+export function createResultTool(deps: {
+	registry: SubagentRegistry;
+	/** How long one call waits before giving up. */
+	waitMs?: number;
+}) {
 	return defineTool({
 		name: RESULT_TOOL_NAME,
 		label: "Get Subagent Result",
 		description:
 			"Read the result of a subagent started with " +
 			`${SPAWN_TOOL_NAME}, by the id that returned. A subagent still ` +
-			"working has no result yet; its answer arrives on its own when it " +
-			"finishes, so there is no need to poll for it.",
+			"working has no result yet, so this waits for it and returns the " +
+			"answer when it arrives: call it once rather than asking again and " +
+			"again. Do not call it at all while there is other work to do — the " +
+			"answer arrives in the conversation on its own.",
 		parameters: Type.Object({
 			id: Type.String({
 				description: `The id ${SPAWN_TOOL_NAME} returned.`,
 			}),
 		}),
 
-		async execute(_toolCallId, params) {
+		async execute(_toolCallId, params, signal) {
 			const record = requireRecord(deps.registry, params.id);
 
+			if (!record.outcome) {
+				await whenFinished(deps.registry, record.id, {
+					signal,
+					timeoutMs: deps.waitMs ?? MAX_WAIT_MS,
+				});
+			}
+
+			// Read after the wait, not before: the record is updated in place, so
+			// this is the answer that arrived while this call was holding.
 			const text = record.outcome
 				? describeCompletion(record, record.outcome)
-				: `Subagent "${record.type}" (${record.id}) is still working. ` +
-					"Its result will arrive here when it finishes.";
+				: `Subagent "${record.type}" (${record.id}) is still working, and ` +
+					"has not finished within the time this call waits. Its result " +
+					"will arrive here on its own when it does.";
 
 			return {
 				content: [{ type: "text" as const, text }],
@@ -652,7 +690,40 @@ export function createResultTool(deps: { registry: SubagentRegistry }) {
 				} satisfies SpawnDetails,
 			};
 		},
+
+		renderResult: (result, options, theme) =>
+			compactResult(
+				result,
+				options,
+				theme,
+				`${result.details?.agent ?? "subagent"} — ${result.details?.status ?? "unknown"}`,
+			),
 	});
+}
+
+/**
+ * A tool result drawn as one muted line, and in full only when the user opens
+ * it.
+ *
+ * These two tools are asked the same question repeatedly by a model waiting on
+ * subagents, and each answer redrawn in full turns the conversation into a wall
+ * of statuses nobody is reading. The text the model receives is untouched —
+ * this is only how it is shown.
+ */
+function compactResult(
+	result: { content: Array<{ type: string }> },
+	options: ToolRenderResultOptions,
+	theme: Theme,
+	summary: string,
+): Component {
+	const full = result.content
+		.filter((block): block is { type: "text"; text: string } => {
+			return block.type === "text";
+		})
+		.map((block) => block.text)
+		.join("\n");
+
+	return new Text(options.expanded ? full : theme.fg("muted", summary), 1, 0);
 }
 
 /**
@@ -720,7 +791,34 @@ export function createListTool(deps: { registry: SubagentRegistry }) {
 				} satisfies ListDetails,
 			};
 		},
+
+		renderResult: (result, options, theme) =>
+			compactResult(result, options, theme, summariseList(result.details)),
 	});
+}
+
+/**
+ * The list as one line: how many subagents, and how many are in each state.
+ *
+ * Counts rather than names, because the names are in the list under the prompt
+ * already — what a reader wants from a repeated call is whether anything has
+ * moved since the last one.
+ */
+function summariseList(details: ListDetails | undefined): string {
+	const subagents = details?.subagents ?? [];
+	if (subagents.length === 0) {
+		return "no subagents";
+	}
+
+	const counts = new Map<string, number>();
+	for (const subagent of subagents) {
+		counts.set(subagent.status, (counts.get(subagent.status) ?? 0) + 1);
+	}
+
+	const states = Array.from(counts, ([status, count]) => `${count} ${status}`);
+	const total =
+		subagents.length === 1 ? "1 subagent" : `${subagents.length} subagents`;
+	return [total, ...states].join(" · ");
 }
 
 /**

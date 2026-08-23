@@ -134,6 +134,8 @@ export class SubagentRegistry {
 	 * re-adding an id must replace the record rather than duplicate it.
 	 */
 	readonly #records = new Map<string, SubagentRecord>();
+	/** How many callers are waiting on each subagent's answer. See `awaitResult`. */
+	readonly #awaited = new Map<string, number>();
 	readonly #listeners = new Set<ChangeListener>();
 	readonly #now: () => number;
 
@@ -227,6 +229,51 @@ export class SubagentRegistry {
 		return this.list().filter((record) => record.status === "running");
 	}
 
+	/**
+	 * Note that somebody is waiting to be handed this subagent's answer, and
+	 * hand back the release.
+	 *
+	 * Counted rather than flagged: two tool calls may ask about one subagent at
+	 * once, and the first to give up must not speak for the second. Kept off the
+	 * record on purpose — this is about a call in flight rather than about the
+	 * subagent, and putting it on the record would redraw the list every time
+	 * somebody asked a question.
+	 */
+	awaitResult(idOrHandle: string): () => void {
+		const record = this.get(idOrHandle);
+		if (!record) {
+			return () => {};
+		}
+
+		const { id } = record;
+		this.#awaited.set(id, (this.#awaited.get(id) ?? 0) + 1);
+
+		let released = false;
+		return () => {
+			if (released) {
+				return;
+			}
+			released = true;
+			const left = (this.#awaited.get(id) ?? 1) - 1;
+			if (left > 0) {
+				this.#awaited.set(id, left);
+			} else {
+				this.#awaited.delete(id);
+			}
+		};
+	}
+
+	/**
+	 * Whether a caller is waiting to be handed this subagent's answer.
+	 *
+	 * Read by the run as it ends, to decide whether its answer still needs
+	 * announcing: one that is about to be returned as a tool result does not.
+	 */
+	isAwaited(idOrHandle: string): boolean {
+		const record = this.get(idOrHandle);
+		return record !== undefined && this.#awaited.has(record.id);
+	}
+
 	/** Subscribe to any change. Call the returned function to stop. */
 	onChange(listener: ChangeListener): () => void {
 		this.#listeners.add(listener);
@@ -253,6 +300,83 @@ export class SubagentRegistry {
 			}
 		}
 	}
+}
+
+/** How a wait can end other than by the subagent finishing. */
+export interface WaitOptions {
+	/** The turn's signal. An abandoned turn stops waiting for its answer. */
+	signal?: AbortSignal;
+	/** Milliseconds before the wait gives up. Omitted waits indefinitely. */
+	timeoutMs?: number;
+}
+
+/**
+ * Wait for a subagent to reach a terminal status.
+ *
+ * This is what a caller asking for a result does instead of asking again and
+ * again: one call that settles when there is something to say. A wait cannot
+ * outlive what it was waiting for — the subagent finishing ends it, the turn
+ * being abandoned ends it, and the cap ends it regardless, so a subagent whose
+ * provider has stopped answering cannot hold a turn open forever.
+ *
+ * Resolves rather than rejects however it ends. The caller reads the record to
+ * find out whether there is an answer, which is the same thing it would have
+ * done had it never waited at all.
+ */
+export function whenFinished(
+	registry: SubagentRegistry,
+	idOrHandle: string,
+	options: WaitOptions = {},
+): Promise<void> {
+	const record = registry.get(idOrHandle);
+	if (!record || TERMINAL_STATUSES.has(record.status)) {
+		return Promise.resolve();
+	}
+
+	return new Promise<void>((resolve) => {
+		const release = registry.awaitResult(record.id);
+		const stops: Array<() => void> = [];
+		let done = false;
+		const settle = () => {
+			if (done) {
+				return;
+			}
+			done = true;
+			for (const stop of stops.splice(0)) {
+				stop();
+			}
+			release();
+			resolve();
+		};
+
+		stops.push(
+			registry.onChange(() => {
+				const current = registry.get(record.id);
+				if (current && TERMINAL_STATUSES.has(current.status)) {
+					settle();
+				}
+			}),
+		);
+
+		const { signal, timeoutMs } = options;
+		if (signal) {
+			if (signal.aborted) {
+				settle();
+				return;
+			}
+			const abandon = () => settle();
+			signal.addEventListener("abort", abandon, { once: true });
+			stops.push(() => signal.removeEventListener("abort", abandon));
+		}
+
+		if (timeoutMs !== undefined) {
+			const timer = setTimeout(settle, timeoutMs);
+			// The cap is a courtesy to a caller that is still there. Holding node
+			// open for it would delay every exit by up to the cap.
+			timer.unref?.();
+			stops.push(() => clearTimeout(timer));
+		}
+	});
 }
 
 /**
