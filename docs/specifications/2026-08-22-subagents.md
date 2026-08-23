@@ -406,12 +406,27 @@ Feature: Starting a subagent with a supplied character
       prompt and all supplying the same name
     Then all 5 subagents are addressable under distinct handles
 
-  Scenario: Refuses a name an agent file already uses
+  Scenario: Runs the supplied character under a name an agent file
+      already uses
     Given an agent file named "security" exists
     When the main agent starts a subagent named "security" supplying
       a system prompt
-    Then the call fails with a message naming both ways to start it
-    And no subagent starts
+    Then the subagent runs under that system prompt
+    And it is addressable as "security"
+    And the result says an agent file of that name was passed over
+
+  Scenario: Says nothing about agent files when no name is shadowed
+    Given no agent file named "security" exists
+    When the main agent starts a subagent named "security" supplying
+      a system prompt
+    Then the result mentions no agent file
+
+  Scenario: Prefers the supplied character to the type named
+      alongside it
+    When the main agent starts a subagent naming a subagent type and
+      supplying a system prompt
+    Then the subagent runs under that system prompt
+    And it is addressable under the type it named
 
   Scenario: Gives it a colour from the palette
     When the main agent starts a subagent supplying a system prompt
@@ -584,7 +599,10 @@ tool Pi does not have, or names a model that would refuse the spawn.
   tool**: a system prompt, a list of tools, and a name. All are
   optional, and supplying the system prompt is what makes a subagent
   run without an agent file. A character is not composed from both
-  sources: either the file supplies it or the call does.
+  sources: either the file supplies it or the call does, and a
+  supplied system prompt is always the one that wins. A subagent type
+  named alongside one is read as the subagent's name, never as a
+  second source of character.
 - **Naming a subagent is the main agent's job, never the user's.**
   The spawn tool's own description directs the main agent to invent a
   short distinct name for each subagent it starts and never to ask
@@ -593,10 +611,21 @@ tool Pi does not have, or names a model that would refuse the spawn.
   because a refusal invites the main agent to recover by asking the
   user, which is the outcome being avoided. Names collide harmlessly:
   the second subagent to want a taken handle is given a numbered one.
-- **A name that an agent file already uses is refused** when a
-  character is supplied with it. An agent file is something a person
-  wrote and can inspect, and letting a model-composed prompt run
-  under that same name would shadow it silently.
+- **A name that an agent file already uses is reported, not
+  refused.** The supplied character runs, under the name it was
+  given, and the spawn result names the file that was passed over and
+  which tier it came from. An agent file is something a person wrote
+  and can inspect, so shadowing one silently is what must not happen;
+  refusing the call is a heavier answer to that than saying so.
+
+> [!NOTE]
+> Amended 2026-08-23, after the first live run. This was a refusal.
+> The user asked for a security reviewer, the main agent composed one
+> and named it `security`, a project agent file of that name existed,
+> and the subagent the user had asked for never started — the
+> protection cost the thing it was protecting. The same run showed the
+> sibling refusal costing the same way, so naming a type alongside a
+> supplied prompt is now the name rather than an error.
 - **A subagent's record carries its own character** — prompt, tools,
   model, effort, turn limit — so that continuing one does not depend
   on a file existing. Continuation still prefers a live agent file
@@ -623,8 +652,8 @@ tool Pi does not have, or names a model that would refuse the spawn.
   run, and nobody reads it first. That is the cost of letting a skill
   ask for a persona it did not ship, and it is accepted rather than
   mitigated: the tool restriction is what bounds what such a subagent
-  can do, and refusing to shadow an existing agent file is what keeps
-  a reviewed persona reviewed.
+  can do, and reporting a shadowed agent file is what keeps a
+  reviewed persona from being replaced unnoticed.
 - **Tool parameter schemas use plain types and explicit enums only.**
   No union or conditional schema constructs, because model providers
   differ in which schema features they accept.

@@ -1234,41 +1234,101 @@ describe("spawn_subagent with a supplied character", () => {
 	});
 
 	// The specification's scenario, quoted.
-	it("Refuses a name an agent file already uses", async () => {
+	it("Runs the supplied character under a name an agent file already uses", async () => {
 		const { tool, run, registry } = harness({
 			agents: [agentConfig({ name: "security" })],
 		});
 
-		// Named for the collision itself, not merely for the name: an "unknown
-		// type" refusal also mentions "security", and would pass a looser match
-		// while saying something quite different.
-		await expect(
-			tool.execute("call-1", INLINE_ARGS, undefined, undefined, ctx),
-		).rejects.toThrow(/already an agent file/i);
+		const result = await tool.execute(
+			"call-1",
+			INLINE_ARGS,
+			undefined,
+			undefined,
+			ctx,
+		);
 
-		expect(run).not.toHaveBeenCalled();
-		expect(registry.list()).toHaveLength(0);
+		// The supplied prompt, not the file's: `agentConfig` gives the file
+		// "You review code.", so either one being wrong fails this.
+		const config = run.mock.calls[0]?.[0].config;
+		expect(config.systemPrompt).toBe("You are a security reviewer.");
+		expect(config.source).toBe("inline");
+		expect(registry.get("sub-1")?.handle).toBe("security");
+		// And said so, rather than letting the file be passed over in silence.
+		expect(resultText(result)).toMatch(/agent file/i);
+	});
+
+	// The specification's scenario, quoted.
+	it("Says nothing about agent files when no name is shadowed", async () => {
+		const { tool } = harness({ agents: [agentConfig({ name: "reviewer" })] });
+
+		const result = await tool.execute(
+			"call-1",
+			INLINE_ARGS,
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(resultText(result)).not.toMatch(/agent file/i);
 	});
 
 	/**
-	 * Not a specification scenario but the schema's own gap: the two routes are
-	 * mutually exclusive and plain types cannot say so, so the refusal is the
-	 * only place that rule lives.
+	 * The other half of that, and the one the guard is for: a subagent started
+	 * from an agent file is named after the file it came from, so a check that
+	 * looked only at the name would tell every file-backed subagent it was
+	 * shadowing itself.
 	 */
-	it("refuses a call that names a type and supplies a character", async () => {
-		const { tool, run } = harness();
+	it("says nothing about agent files when the subagent came from one", async () => {
+		const { tool } = harness({ agents: [agentConfig({ name: "reviewer" })] });
 
-		await expect(
-			tool.execute(
-				"call-1",
-				{ ...INLINE_ARGS, subagent_type: "reviewer" },
-				undefined,
-				undefined,
-				ctx,
-			),
-		).rejects.toThrow(/both|not both/i);
+		const result = await tool.execute(
+			"call-1",
+			VALID_ARGS,
+			undefined,
+			undefined,
+			ctx,
+		);
 
-		expect(run).not.toHaveBeenCalled();
+		expect(resultText(result)).not.toMatch(/agent file/i);
+	});
+
+	// The specification's scenario, quoted.
+	it("Prefers the supplied character to the type named alongside it", async () => {
+		const { tool, run, registry } = harness({
+			agents: [agentConfig({ name: "reviewer" })],
+		});
+		const { name: _unnamed, ...withoutName } = INLINE_ARGS;
+
+		await tool.execute(
+			"call-1",
+			{ ...withoutName, subagent_type: "reviewer" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		const config = run.mock.calls[0]?.[0].config;
+		expect(config.systemPrompt).toBe("You are a security reviewer.");
+		expect(config.source).toBe("inline");
+		// The type stands in for the name it was given instead of, so the handle
+		// is the short word rather than one slugged from the description.
+		expect(registry.get("sub-1")?.handle).toBe("reviewer");
+	});
+
+	it("takes an explicit name over the type when both are given", async () => {
+		const { tool, registry } = harness({
+			agents: [agentConfig({ name: "reviewer" })],
+		});
+
+		await tool.execute(
+			"call-1",
+			{ ...INLINE_ARGS, subagent_type: "reviewer" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(registry.get("sub-1")?.handle).toBe("security");
 	});
 
 	it("refuses a call that neither names a type nor supplies a character", async () => {

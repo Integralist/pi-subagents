@@ -421,6 +421,23 @@ is one commit on `main`, made at the end of the turn that implements it.
   falls to `DEFAULT_MAX_TURNS` (`src/spawn.ts:172-174`). Both are
   covered by a test rather than by new code.
 
+  > [!NOTE]
+  > Both refusals in this sketch were removed on 2026-08-23, after the
+  > first live run through `make try`. Asked for three reviewers, the
+  > main agent composed a security persona, named it `security`, and the
+  > collision check refused it because `.pi/agents/security.md` exists —
+  > the user got an error where the subagent they had asked for by name
+  > should have been. A supplied `system_prompt` is now the character
+  > whatever else the call carries, and `subagent_type` alongside one is
+  > read as the name, ahead of the description fallback:
+  > `params.name?.trim() || type || params.description`. Silence was the
+  > real hazard, not shadowing, so `shadowedFile` finds the file a
+  > supplied character is about to be named over and `describeStart`
+  > names it and its tier. The spec's scenario and both ADRs are amended
+  > to match; four tests replaced the two refusal tests, two of them
+  > negative controls proving the note stays quiet for a subagent that
+  > came from a file.
+
 - [x] **Task 2.3**: Stop claiming the tool is unusable without agent
   files.
 

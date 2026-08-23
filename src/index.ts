@@ -277,10 +277,11 @@ interface SpawnRoute {
 /**
  * The definition a spawn call asks for, by whichever of the two routes it took.
  *
- * A character comes from an agent file or from the call, never from both — the
- * plain-schema rule leaves no way to say "one of these" in the schema itself,
- * so this is the only place that rule lives. Each refusal names the way out,
- * because a caller that cannot tell which field to drop will guess.
+ * A supplied `system_prompt` is the character, whatever else the call carries.
+ * An agent file is what a call with no prompt of its own falls back to — by the
+ * type it named, and only then. The plain-schema rule leaves no way to say "one
+ * of these" in the schema, and a refusal in its place cost the user the
+ * subagent they had asked for: see `shadowedFile` for what is said instead.
  */
 export function resolveSpawnConfig(
 	params: SpawnRoute,
@@ -288,14 +289,6 @@ export function resolveSpawnConfig(
 ): AgentConfig {
 	const supplied = params.system_prompt?.trim();
 	const type = params.subagent_type?.trim();
-
-	if (supplied && type) {
-		throw new Error(
-			"A subagent takes its character from an agent file or from " +
-				"system_prompt, not both. Drop subagent_type to use the prompt you " +
-				"supplied, or drop system_prompt to use the file.",
-		);
-	}
 
 	if (!supplied) {
 		if (!type) {
@@ -322,20 +315,13 @@ export function resolveSpawnConfig(
 	}
 
 	// `assignHandle` slugs whatever it is given, so a name left out can fall
-	// back to the description without slugging anything here. The handle that
-	// yields is ugly — a description is three to five words — and that is the
-	// point: refusing would send the caller back to the user for a name, which
-	// is the one outcome this route exists to avoid.
-	const name = params.name?.trim() || params.description;
-
-	const shadowed = agents.find((agent) => agent.name === name);
-	if (shadowed) {
-		throw new Error(
-			`"${name}" is already an agent file (${shadowed.source}). Either name ` +
-				"it as subagent_type without a system_prompt to use that file, or " +
-				"choose a different name for the subagent you are describing.",
-		);
-	}
+	// back to the description without slugging anything here. A type named
+	// alongside a prompt comes first, being the short word the description is
+	// not: a caller that filled in both fields still said what to call this.
+	// The handle a description yields is ugly — three to five words — and that
+	// is the point: refusing would send the caller back to the user for a name,
+	// which is the one outcome this route exists to avoid.
+	const name = params.name?.trim() || type || params.description;
 
 	return {
 		name,
@@ -344,6 +330,26 @@ export function resolveSpawnConfig(
 		tools: params.tools,
 		source: "inline",
 	};
+}
+
+/**
+ * The agent file a supplied character is about to be named over, if there is
+ * one.
+ *
+ * Shadowing was a refusal until live use showed the cost: the main agent was
+ * asked for a security reviewer, composed one, named it `security`, and the
+ * subagent never started because a file of that name existed. The character the
+ * user asked for now wins and the file is passed over — but silently passing
+ * over a persona somebody wrote and read is the thing the refusal was
+ * protecting, so the caller is told.
+ */
+function shadowedFile(
+	config: AgentConfig,
+	agents: AgentConfig[],
+): AgentConfig | undefined {
+	return config.source === "inline"
+		? agents.find((agent) => agent.name === config.name)
+		: undefined;
 }
 
 /**
@@ -357,8 +363,19 @@ function describeStart(
 	record: SubagentRecord,
 	unknownTools: string[],
 	choice: ModelChoice,
+	shadowed: AgentConfig | undefined,
 ): string {
 	const parts: string[] = [];
+
+	if (shadowed) {
+		// The source is worth naming: which of the three tiers holds the file is
+		// what tells the caller whether it is one the user wrote.
+		parts.push(
+			`Note: a ${shadowed.source} agent file is also named ` +
+				`"${shadowed.name}". This subagent runs under the system_prompt you ` +
+				"supplied, not that file.",
+		);
+	}
 
 	if (choice.fellBack) {
 		// Dismissing the dialog leaves the parent's model in play. Saying so keeps
@@ -405,7 +422,9 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 				Type.String({
 					description:
 						"Name of the subagent to delegate to, from the list above. " +
-						"Omit it when supplying system_prompt instead.",
+						"Omit it when supplying system_prompt instead: a supplied " +
+						"system_prompt is always what the subagent runs under, and a " +
+						"type named alongside one is read only as its name.",
 				}),
 			),
 			system_prompt: Type.Optional(
@@ -523,7 +542,12 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 				content: [
 					{
 						type: "text" as const,
-						text: describeStart(record, unknownTools, choice),
+						text: describeStart(
+							record,
+							unknownTools,
+							choice,
+							shadowedFile(config, agents),
+						),
 					},
 				],
 				details: {

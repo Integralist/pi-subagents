@@ -66,6 +66,23 @@ never grounds for refusal.
 A supplied name that matches an existing agent file is refused,
 naming both routes so the caller can pick one.
 
+> [!NOTE]
+> Amended 2026-08-23, after the first live run, and this paragraph no
+> longer holds. Asked for three reviewers, the main agent composed a
+> security persona, named it `security`, and the call was refused
+> because `.pi/agents/security.md` exists — so the user got two
+> reviewers and an error where the one they had asked for by name
+> should have been. The supplied character now wins and the spawn
+> result names the file it shadowed, along with the tier that file came
+> from. The mutual-exclusion refusal goes with it: `subagent_type`
+> supplied alongside `system_prompt` is now read as the subagent's
+> name, because it is a short word where the fallback is a slugged
+> description, and because refusing cost a round trip for a call whose
+> intent was never in doubt. That is not the silent substitution the
+> fourth option below was rejected for: a `subagent_type` that names a
+> real file is by definition a name that shadows one, so the result
+> says the file was passed over.
+
 We will not ship neutral `general` or `general-readonly` agent files.
 
 ## Options Considered
@@ -117,9 +134,9 @@ up a review step. An agent file is written by a person, read before it
 is used, and changed in one place for every subagent that runs from
 it. A persona supplied at spawn is composed by a model, for one run,
 and nobody reads it first. Two things bound it — the `tools`
-parameter limits what such a subagent can do, and refusing to shadow
-an existing agent file keeps a reviewed persona reviewed. Neither
-restores the review.
+parameter limits what such a subagent can do, and a shadowed agent
+file is named in the spawn result, so a reviewed persona is never
+replaced unnoticed. Neither restores the review.
 
 New constraint: `AgentSource` gains a fourth value, `"inline"`, and it
 is load-bearing rather than descriptive. Continuation branches on it

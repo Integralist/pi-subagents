@@ -181,10 +181,13 @@ Three rules are worth knowing:
   A call that omits `name` gets a handle derived from `description` —
   `@security-and-abuse-review` — because refusing would send the model back to
   you for a name.
-- **A name an agent file already uses is refused.** A prompt a model composed
-  cannot quietly shadow a persona you wrote and read.
-- **It is one route or the other.** Supply `system_prompt` or name a
-  `subagent_type`, not both.
+- **A name an agent file already uses is reported, not refused.** The supplied
+  character runs, and the spawn result says which file it was named over and
+  which tier that file came from — a prompt a model composed cannot shadow a
+  persona you wrote and read *quietly*, which is the part that matters.
+- **A supplied `system_prompt` always wins.** It is the character whatever else
+  the call carries; a `subagent_type` named alongside one is read as the
+  subagent's name, not as a second source of character.
 
 > [!NOTE]
 > A file is reviewable and reusable; a supplied character is neither — nobody
@@ -205,9 +208,10 @@ Five tools. Four address one subagent by the id that `spawn_subagent` returns;
 | `stop_subagent`       | `id`                                           |
 
 The two routes into `spawn_subagent` are `subagent_type`, naming an agent file,
-or `system_prompt` with an optional `name` and `tools`. One or the other, never
-both. `model`, `thinking` and `max_turns` are optional either way, and each
-overrides whatever an agent file set.
+or `system_prompt` with an optional `name` and `tools`. Supplying a
+`system_prompt` takes the second route whatever else is given. `model`,
+`thinking` and `max_turns` are optional either way, and each overrides whatever
+an agent file set.
 
 `spawn_subagent` returns as soon as the subagent is under way; the answer
 arrives in the conversation on its own when it is done, so the main model can
