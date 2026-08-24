@@ -366,6 +366,43 @@ describe("SubagentViewer", () => {
 		});
 
 		/**
+		 * A panel that changes height as its subagent talks leaves its taller
+		 * self behind on screen. Pi renders differentially and skips the clearing
+		 * pass while an overlay is up (`pi-tui/dist/tui-main-screen.js:255`), so
+		 * rows the panel no longer covers keep whatever was last drawn there —
+		 * which is how one panel came to be three stacked title bars. A constant
+		 * height is what makes that impossible rather than unlikely.
+		 */
+		it("stands the same height whether the subagent has said much or little", () => {
+			const quiet = viewer({ rows: 20 });
+			expect(plain(quiet).length).toBe(20);
+
+			session.messages = Array.from({ length: 30 }, (_, i) =>
+				assistant(`reply number ${i}`),
+			);
+			session.emit();
+
+			expect(plain(quiet).length).toBe(20);
+		});
+
+		/**
+		 * Padded above rather than below, so what the subagent just said sits
+		 * against the prompt and the conversation grows towards it, as it does in
+		 * the session this panel is opened from.
+		 */
+		it("puts what was said last nearest the prompt", () => {
+			session.messages = [assistant("No race here.")];
+
+			const lines = plain(viewer({ rows: 20 }));
+			const rule = lines.findIndex((line) => line.startsWith("┣"));
+
+			expect(rule).toBeGreaterThan(0);
+			expect(lines[rule - 1]).toContain("No race here.");
+			// The blank rows are above it: frame, nothing, frame.
+			expect(lines[1]).toMatch(/^┃ +┃$/);
+		});
+
+		/**
 		 * Nothing sensible fits in three rows, but the panel must still not
 		 * overflow — and what survives should be its end, because that is where
 		 * the prompt and the keys are.

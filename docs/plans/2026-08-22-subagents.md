@@ -1539,6 +1539,15 @@ That has a direct consequence for how the work is handed out.
   > discriminates: a bare `\x1b` matches `escape` and not `up`. The tests
   > still feed the raw sequences, so they exercise the real decoding.
   >
+  > **Seeing everything cost a bug (2026-08-24).** `matchesKey` matches a
+  > key's press *and* its release, and pi filters releases out only on the
+  > way to a focused component (`pi-tui/dist/tui.js:618`) — an input
+  > listener is handed both. Under Ghostty, which runs the Kitty
+  > protocol, one press of the down arrow therefore moved the selection
+  > two rows: entering the list skipped the first subagent, and leaving it
+  > skipped it again. `handleKey` now ignores releases and keeps repeats,
+  > since holding a key down is meant to move.
+  >
   > **The list never holds focus, so `handleInput` is never called on it.**
   > `Component.handleInput` only fires for the focused component, and the
   > focus belongs to the editor. `tui.addInputListener` is the only way
@@ -1737,7 +1746,17 @@ That has a direct consequence for how the work is handed out.
   > `OVERLAY_SIZE` in `src/index.ts` now come from one pair of
   > constants, the panel is handed the rows that leaves it, and it fills
   > them exactly rather than reserving four for a session the overlay
-  > was already keeping clear. The overlay also shrank to 80% by 70%, as
+  > was already keeping clear.
+  >
+  > **And it fills them in every frame (2026-08-24).** Sized correctly but
+  > still free to be shorter than its rows when the transcript was short,
+  > the panel grew as its subagent talked — and pi renders the screen
+  > differentially, skipping the pass that clears uncovered rows while an
+  > overlay is up (`pi-tui/dist/tui-main-screen.js:255`), so each taller
+  > frame left the last one behind. The user saw one panel as three
+  > stacked title bars. The body is now padded to its full budget, above
+  > the conversation, so the height never changes and what was said last
+  > sits against the prompt. The overlay also shrank to 80% by 70%, as
   > the user asked. Two mutations survived the first pass, both hidden
   > by the clamp that keeps an overlong panel inside its rows: counting
   > lines cannot tell a panel that budgeted correctly from one that

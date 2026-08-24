@@ -652,6 +652,13 @@ describe("SubagentList navigation", () => {
 	const ESC = "\x1b";
 	const ENTER = "\r";
 	const DELETE = "\x1b[3~";
+	/**
+	 * What a terminal running the Kitty keyboard protocol sends when the key
+	 * comes back up. Ghostty does, so this is what a user actually types with:
+	 * every press arrives twice, and `matchesKey` cannot tell the two apart.
+	 */
+	const DOWN_RELEASE = "\x1b[1;1:3B";
+	const UP_RELEASE = "\x1b[1;1:3A";
 
 	/** A list over `count` running subagents, at an empty prompt by default. */
 	function nav(count: number, text = "") {
@@ -670,6 +677,40 @@ describe("SubagentList navigation", () => {
 		}
 		return consumed;
 	}
+
+	/**
+	 * Pi filters key releases out before they reach a focused component
+	 * (`pi-tui/dist/tui.js:618`), but this list is not a focused component — it
+	 * reads the keyboard through an input listener, which is given everything.
+	 * Unfiltered, one press of the down arrow moved the selection two rows and
+	 * the first subagent could not be reached at all.
+	 */
+	describe("keys that arrive twice", () => {
+		it("moves one row per press, not one per press and release", () => {
+			const subject = nav(3);
+
+			press(subject, DOWN, DOWN_RELEASE);
+
+			expect(subject.selectedId).toBe("sub-0");
+		});
+
+		it("leaves the list on the press that leaves it, not before", () => {
+			const subject = nav(3);
+			press(subject, DOWN, DOWN_RELEASE);
+
+			press(subject, UP, UP_RELEASE);
+
+			expect(subject.selectedId).toBeUndefined();
+		});
+
+		/** Not consumed either: a key this list did not act on is not its key. */
+		it("passes a release on rather than consuming it", () => {
+			const subject = nav(3);
+			press(subject, DOWN);
+
+			expect(subject.handleKey(DOWN_RELEASE)).toBe(false);
+		});
+	});
 
 	describe("entering and leaving", () => {
 		// The specification's scenario, quoted.

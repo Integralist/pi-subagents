@@ -192,9 +192,23 @@ export class SubagentViewer implements Component {
 		// The tail, not the head: a view that follows a working subagent has to
 		// show what it just said. Anything older has scrolled off, which is what
 		// the transcript on disk is for.
+		const shown = budget === 0 ? [] : body.slice(-budget);
+
+		// Padded to the full budget, above the conversation, so the panel is the
+		// same height in every frame and what was said last sits against the
+		// prompt. A panel that grew and shrank with its transcript left its
+		// taller self on screen: pi renders differentially and skips the pass
+		// that clears rows nothing covers any more while an overlay is up
+		// (`pi-tui/dist/tui-main-screen.js:255`), which is how one panel came to
+		// be three stacked title bars.
+		const filler = Array.from({ length: budget - shown.length }, () =>
+			this.#row("", width),
+		);
+
 		const lines = [
 			this.#header(width),
-			...(budget === 0 ? [] : body.slice(-budget)),
+			...filler,
+			...shown,
 			...foot,
 			this.#rail(
 				FRAME.bottomLeft,

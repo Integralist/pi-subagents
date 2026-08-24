@@ -724,7 +724,15 @@ tool Pi does not have, or names a model that would refuse the spawn.
 - **Colours are assigned deterministically** from a fixed palette, so
   a subagent keeps its colour for its whole life.
 - **The subagent list captures arrow keys only when the prompt is
-  empty**, so ordinary typing is never intercepted.
+  empty**, so ordinary typing is never intercepted. Key *releases* are
+  ignored: the list reads the keyboard through an input listener rather
+  than as a focused component, and pi filters releases only for the
+  latter — so under a terminal running the Kitty keyboard protocol one
+  press would otherwise move the selection twice.
+- **The open conversation is a constant height** for as long as it is
+  open. Pi renders the screen differentially and skips the pass that
+  clears uncovered rows while an overlay is up, so a panel that grew
+  and shrank with its transcript would leave its taller self behind.
 - **The open conversation is drawn as a framed panel with a prompt of
   its own.** Pi's overlays carry no border, and without one the panel
   reads as more of the conversation underneath it; the frame's rails

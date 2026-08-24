@@ -71,7 +71,7 @@ That is the four checks this repository holds itself to:
 
 | Target            | What it does                                     |
 | ----------------- | ------------------------------------------------ |
-| `make test`       | 582 tests under `vitest`                         |
+| `make test`       | 587 tests under `vitest`                         |
 | `make typecheck`  | `tsc --noEmit`                                   |
 | `make lint`       | `biome check src test`                           |
 | `make load-check` | loads the extension through pi's own jiti loader |
@@ -260,7 +260,8 @@ before a second one starts.
 
 Arrow keys only reach the list when the prompt is empty, so ordinary typing and
 cursor movement are never intercepted. With text in the prompt, enter submits it
-as usual.
+as usual. Each press moves one row, including under terminals that report key
+releases as well as presses.
 
 Opening a subagent shows its conversation as pi draws its own — markdown, tool
 calls, and their output — inside a framed panel over the session, and follows it

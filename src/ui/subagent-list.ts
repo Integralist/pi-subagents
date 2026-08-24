@@ -15,6 +15,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,
+	isKeyRelease,
 	Key,
 	matchesKey,
 	type TuiInputListener,
@@ -446,6 +447,18 @@ export class SubagentList implements Component {
 	 * text.
 	 */
 	handleKey(data: string): boolean {
+		// One press of a key arrives twice under the Kitty keyboard protocol —
+		// pressed, then released — and `matchesKey` matches both. Pi filters
+		// releases out before they reach a focused component
+		// (`pi-tui/dist/tui.js:618`), but this list is not one: it reads the
+		// keyboard through an input listener, which is handed everything. Left
+		// unfiltered, one press of the down arrow moved the selection two rows,
+		// so the first subagent could not be selected at all. Repeats are not
+		// filtered — holding a key down is meant to move.
+		if (isKeyRelease(data)) {
+			return false;
+		}
+
 		// An opened subagent's view holds the keyboard while it is on screen. This
 		// list's input listener is consulted before the focused view, so a key
 		// taken here would act on the list instead — escape would leave the list
