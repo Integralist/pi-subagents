@@ -451,7 +451,7 @@ export function resumeSubagent(opts: ResumeSubagentOptions): ResumeResult {
  */
 export const renderCompletion: MessageRenderer<SubagentCompleteDetails> = (
 	message,
-	_options,
+	options,
 	theme,
 ): Component | undefined => {
 	const details = message.details;
@@ -465,6 +465,10 @@ export const renderCompletion: MessageRenderer<SubagentCompleteDetails> = (
 			`${STATUS_MARK[details.status]} ${details.agent} — ${details.description}`,
 		),
 	);
+	if (!options?.expanded) {
+		return new Text(heading, 1, 0);
+	}
+
 	const body = typeof message.content === "string" ? message.content : "";
 
 	return new Text(`${heading}\n${theme.fg("muted", body)}`, 1, 0);

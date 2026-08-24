@@ -907,7 +907,20 @@ describe("renderCompletion", () => {
 	it("heads the notice with the agent and what it was asked to do", () => {
 		const component = renderCompletion(
 			completionMessage(DETAILS),
-			{} as never,
+			{ expanded: false, outputPad: 0 },
+			plainTheme,
+		);
+
+		const lines = component?.render(80).join("\n") ?? "";
+		expect(lines).toContain("reviewer");
+		expect(lines).toContain("review agents file");
+		expect(lines).not.toContain("looks fine");
+	});
+
+	it("shows the full message body when expanded", () => {
+		const component = renderCompletion(
+			completionMessage(DETAILS),
+			{ expanded: true, outputPad: 0 },
 			plainTheme,
 		);
 
