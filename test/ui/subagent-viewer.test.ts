@@ -372,14 +372,15 @@ describe("SubagentViewer", () => {
 	 * frame the conversation cleanly without side-rail rendering artifacts.
 	 */
 	describe("the framing", () => {
-		it("frames the view with top and bottom dividers", () => {
+		it("frames the view with a top banner and bottom divider", () => {
 			session.messages = [assistant("No race here.")];
 
 			const lines = plain(viewer());
 			const top = lines[0] ?? "";
 			const bottom = lines.at(-1) ?? "";
 
-			expect(top.startsWith("─")).toBe(true);
+			expect(top.startsWith("━")).toBe(true);
+			expect(top).toContain("SUBAGENT:");
 			expect(bottom.startsWith("─")).toBe(true);
 		});
 
@@ -391,7 +392,7 @@ describe("SubagentViewer", () => {
 			const lines = plain(viewer({ rows: 20 }));
 
 			expect(lines.length).toBe(20);
-			expect(lines[0]?.startsWith("─")).toBe(true);
+			expect(lines[0]?.startsWith("━")).toBe(true);
 			expect(lines.at(-1)?.startsWith("─")).toBe(true);
 		});
 
@@ -408,7 +409,7 @@ describe("SubagentViewer", () => {
 			const lines = plain(viewer({ rows: 4 }));
 
 			expect(lines.length).toBe(4);
-			expect(lines[0]?.startsWith("─")).toBe(true);
+			expect(lines[0]?.startsWith("━")).toBe(true);
 			expect(lines.at(-1)?.startsWith("─")).toBe(true);
 		});
 
@@ -460,7 +461,7 @@ describe("SubagentViewer", () => {
 
 			const lines = plain(viewer({ rows: 8 }));
 
-			expect(lines[0]?.startsWith("─")).toBe(true);
+			expect(lines[0]?.startsWith("━")).toBe(true);
 			expect(lines.at(-1)?.startsWith("─")).toBe(true);
 			expect(lines.length).toBeLessThanOrEqual(8);
 		});

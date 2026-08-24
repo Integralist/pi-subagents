@@ -30,13 +30,14 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import { colorize } from "../colors.ts";
 import type { ControlResult } from "../control.ts";
 import {
 	type SubagentRecord,
 	type SubagentRegistry,
 	TERMINAL_STATUSES,
 } from "../registry.ts";
-import { STATUS_COLOR, STATUS_MARK } from "./status.ts";
+import { STATUS_MARK } from "./status.ts";
 import { formatMeta } from "./subagent-list.ts";
 import { Transcript } from "./transcript.ts";
 
@@ -199,11 +200,11 @@ export class SubagentViewer implements Component {
 		return this.#options.rows?.() ?? this.#options.tui.terminal.rows;
 	}
 
-	/** A horizontal divider with optional inlaid label. */
+	/** A horizontal divider with optional inlaid label in the subagent's color. */
 	#divider(label: string, width: number): string {
-		const { theme } = this.#options;
+		const { record } = this.#options;
 		if (!label) {
-			return theme.fg("borderAccent", RULE.repeat(Math.max(0, width)));
+			return colorize(record.color, RULE.repeat(Math.max(0, width)));
 		}
 
 		const room = Math.max(0, width - 4);
@@ -211,27 +212,29 @@ export class SubagentViewer implements Component {
 		const fill = Math.max(0, width - visibleWidth(inlaid));
 		const left = Math.floor(fill / 2);
 		const right = fill - left;
-		return theme.fg(
-			"borderAccent",
+		return colorize(
+			record.color,
 			`${RULE.repeat(left)}${inlaid}${RULE.repeat(right)}`,
 		);
 	}
 
 	/**
-	 * The top divider: the subagent, named the way its row in the list names it,
-	 * and its status.
+	 * The top banner strip: prominently colored in the subagent's color.
 	 */
 	#header(width: number): string {
-		const { record, theme } = this.#options;
+		const { record } = this.#options;
 		const meta = formatMeta(record);
 		const metaSuffix = meta ? ` (${meta})` : "";
-		const mark = theme.fg(
-			STATUS_COLOR[record.status],
-			STATUS_MARK[record.status],
-		);
-		return this.#divider(
-			`${mark} ${record.handle} — ${record.description}${metaSuffix}`,
-			width,
+		const mark = STATUS_MARK[record.status];
+		const label = ` SUBAGENT: ${mark} ${record.handle} — ${record.description}${metaSuffix} `;
+		const room = Math.max(0, width - 4);
+		const inlaid = truncateToWidth(label, room, "…", false);
+		const fill = Math.max(0, width - visibleWidth(inlaid));
+		const left = Math.floor(fill / 2);
+		const right = fill - left;
+		return colorize(
+			record.color,
+			`${"━".repeat(left)}${inlaid}${"━".repeat(right)}`,
 		);
 	}
 

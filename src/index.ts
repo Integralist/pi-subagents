@@ -1168,24 +1168,27 @@ export default function (pi: ExtensionAPI): void {
 		const openViewer = async (record: SubagentRecord): Promise<void> => {
 			viewerOpen = true;
 			try {
-				await ctx.ui.custom<void>(
-					(tui, theme, _keybindings, done) =>
-						new SubagentViewer({
-							record,
-							registry,
-							theme,
-							tui,
-							cwd: ctx.cwd,
-							// Read each time rather than captured, so a terminal resized
-							// while the panel is open resizes the panel with it.
-							rows: () => Math.max(8, tui.terminal.rows - 1),
-							close: () => done(),
-							steer: (steering, message) =>
-								steerSubagent(steering, message, { registry }),
-							stop: (stopping) =>
-								stopFromUi(stopping, { registry, queue }, sendMessage),
-						}),
-				);
+				await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+					tui.requestRender(true);
+					return new SubagentViewer({
+						record,
+						registry,
+						theme,
+						tui,
+						cwd: ctx.cwd,
+						// Read each time rather than captured, so a terminal resized
+						// while the panel is open resizes the panel with it.
+						rows: () => Math.max(8, tui.terminal.rows - 1),
+						close: () => {
+							tui.requestRender(true);
+							done();
+						},
+						steer: (steering, message) =>
+							steerSubagent(steering, message, { registry }),
+						stop: (stopping) =>
+							stopFromUi(stopping, { registry, queue }, sendMessage),
+					});
+				});
 			} finally {
 				viewerOpen = false;
 			}
