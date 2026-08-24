@@ -355,6 +355,20 @@ describe("SubagentViewer", () => {
 
 			expect(plain(subject).at(-1)).not.toContain("[↑");
 		});
+
+		it("does not hijack Home or End when text is typed in prompt", () => {
+			session.messages = Array.from({ length: 30 }, (_, i) =>
+				assistant(`reply number ${i}`),
+			);
+
+			const subject = viewer({ rows: 12 });
+			type(subject, "look closer");
+			subject.handleInput(HOME);
+
+			// Home went to the prompt cursor rather than scrolling to top
+			expect(text(subject)).toContain("reply number 29");
+			expect(plain(subject).at(-1)).not.toContain("[↑");
+		});
 	});
 
 	/**

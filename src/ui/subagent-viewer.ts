@@ -375,55 +375,58 @@ export class SubagentViewer implements Component {
 			return;
 		}
 
-		// Page navigation & scrolling
-		const isPageUp =
-			matchesKey(data, Key.pageUp) ||
-			matchesKey(data, Key.ctrl("u")) ||
-			matchesKey(data, Key.ctrl("b"));
-		const isPageDown =
-			matchesKey(data, Key.pageDown) ||
-			matchesKey(data, Key.ctrl("d")) ||
-			matchesKey(data, Key.ctrl("f"));
-		const isHome = matchesKey(data, Key.home);
-		const isEnd = matchesKey(data, Key.end);
-		const isUp = matchesKey(data, Key.up) || matchesKey(data, Key.shift("up"));
-		const isDown =
-			matchesKey(data, Key.down) || matchesKey(data, Key.shift("down"));
+		const promptEmpty = !live || this.#input.getValue() === "";
 
-		if (isPageUp) {
+		// PageUp / PageDown always scroll the transcript
+		if (matchesKey(data, Key.pageUp)) {
 			this.#scrollOffset += this.#pageStep();
 			this.#requestRender();
 			return;
 		}
 
-		if (isPageDown) {
+		if (matchesKey(data, Key.pageDown)) {
 			this.#scrollOffset = Math.max(0, this.#scrollOffset - this.#pageStep());
 			this.#requestRender();
 			return;
 		}
 
-		if (isHome) {
-			this.#scrollOffset = Number.MAX_SAFE_INTEGER;
-			this.#requestRender();
-			return;
-		}
-
-		if (isEnd) {
-			this.#scrollOffset = 0;
-			this.#requestRender();
-			return;
-		}
-
-		if (isUp && (!live || this.#input.getValue() === "")) {
-			this.#scrollOffset += 1;
-			this.#requestRender();
-			return;
-		}
-
-		if (isDown && (!live || this.#input.getValue() === "")) {
-			if (this.#scrollOffset > 0) {
-				this.#scrollOffset -= 1;
+		// When prompt is empty, navigation & readline keys scroll the transcript
+		if (promptEmpty) {
+			if (matchesKey(data, Key.ctrl("u")) || matchesKey(data, Key.ctrl("b"))) {
+				this.#scrollOffset += this.#pageStep();
 				this.#requestRender();
+				return;
+			}
+
+			if (matchesKey(data, Key.ctrl("d")) || matchesKey(data, Key.ctrl("f"))) {
+				this.#scrollOffset = Math.max(0, this.#scrollOffset - this.#pageStep());
+				this.#requestRender();
+				return;
+			}
+
+			if (matchesKey(data, Key.home)) {
+				this.#scrollOffset = Number.MAX_SAFE_INTEGER;
+				this.#requestRender();
+				return;
+			}
+
+			if (matchesKey(data, Key.end)) {
+				this.#scrollOffset = 0;
+				this.#requestRender();
+				return;
+			}
+
+			if (matchesKey(data, Key.up) || matchesKey(data, Key.shift("up"))) {
+				this.#scrollOffset += 1;
+				this.#requestRender();
+				return;
+			}
+
+			if (matchesKey(data, Key.down) || matchesKey(data, Key.shift("down"))) {
+				if (this.#scrollOffset > 0) {
+					this.#scrollOffset -= 1;
+					this.#requestRender();
+				}
 				return;
 			}
 		}

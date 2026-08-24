@@ -1156,6 +1156,8 @@ export default function (pi: ExtensionAPI): void {
 			return;
 		}
 
+		let viewerOpen = false;
+
 		/**
 		 * Show one subagent's conversation in a full TUI view, until it is closed.
 		 *
@@ -1163,32 +1165,39 @@ export default function (pi: ExtensionAPI): void {
 		 * calls the `done` it was given, which is what the list waits on before it
 		 * starts taking keys again.
 		 */
-		const openViewer = (record: SubagentRecord): Promise<void> =>
-			ctx.ui.custom<void>(
-				(tui, theme, _keybindings, done) =>
-					new SubagentViewer({
-						record,
-						registry,
-						theme,
-						tui,
-						cwd: ctx.cwd,
-						// Read each time rather than captured, so a terminal resized
-						// while the panel is open resizes the panel with it.
-						rows: () => tui.terminal.rows,
-						close: () => done(),
-						steer: (steering, message) =>
-							steerSubagent(steering, message, { registry }),
-						stop: (stopping) =>
-							stopFromUi(stopping, { registry, queue }, sendMessage),
-					}),
-			);
+		const openViewer = async (record: SubagentRecord): Promise<void> => {
+			viewerOpen = true;
+			try {
+				await ctx.ui.custom<void>(
+					(tui, theme, _keybindings, done) =>
+						new SubagentViewer({
+							record,
+							registry,
+							theme,
+							tui,
+							cwd: ctx.cwd,
+							// Read each time rather than captured, so a terminal resized
+							// while the panel is open resizes the panel with it.
+							rows: () => Math.max(8, tui.terminal.rows - 1),
+							close: () => done(),
+							steer: (steering, message) =>
+								steerSubagent(steering, message, { registry }),
+							stop: (stopping) =>
+								stopFromUi(stopping, { registry, queue }, sendMessage),
+						}),
+				);
+			} finally {
+				viewerOpen = false;
+			}
+		};
 
 		ctx.ui.setWidget(
 			SUBAGENT_LIST_WIDGET,
 			// Built per mount rather than once: the theme arrives here, and a theme
 			// change remounts the widget with the new one.
-			(tui, theme) =>
-				new SubagentList({
+			(tui, theme) => {
+				if (viewerOpen) return undefined as never;
+				return new SubagentList({
 					registry,
 					theme,
 					requestRender: () => tui.requestRender(),
@@ -1212,7 +1221,8 @@ export default function (pi: ExtensionAPI): void {
 							},
 						);
 					},
-				}),
+				});
+			},
 			{ placement: "belowEditor" },
 		);
 	});
