@@ -18,6 +18,11 @@ beforeAll(() => {
 });
 
 const UP = "\x1b[A";
+const DOWN = "\x1b[B";
+const PAGE_UP = "\x1b[5~";
+const PAGE_DOWN = "\x1b[6~";
+const HOME = "\x1b[H";
+const END = "\x1b[F";
 const ENTER = "\r";
 const ESC = "\x1b";
 const BACKSPACE = "\x7f";
@@ -292,6 +297,63 @@ describe("SubagentViewer", () => {
 			);
 
 			expect(plain(viewer({ rows: 12 })).length).toBeLessThanOrEqual(12);
+		});
+	});
+
+	describe("scrolling", () => {
+		it("scrolls up and down with PageUp and PageDown", () => {
+			session.messages = Array.from({ length: 30 }, (_, i) =>
+				assistant(`reply number ${i}`),
+			);
+
+			const subject = viewer({ rows: 12 });
+			subject.handleInput(PAGE_UP);
+			expect(plain(subject).at(-1)).toContain("[↑");
+
+			subject.handleInput(PAGE_DOWN);
+			expect(plain(subject).at(-1)).not.toContain("[↑");
+		});
+
+		it("scrolls back to the bottom with Home and End", () => {
+			session.messages = Array.from({ length: 30 }, (_, i) =>
+				assistant(`reply number ${i}`),
+			);
+
+			const subject = viewer({ rows: 12 });
+			subject.handleInput(HOME);
+			expect(text(subject)).toContain("reply number 0");
+
+			subject.handleInput(END);
+			expect(text(subject)).toContain("reply number 29");
+			expect(plain(subject).at(-1)).not.toContain("[↑");
+		});
+
+		it("scrolls with Up and Down arrow keys when prompt is empty", () => {
+			session.messages = Array.from({ length: 30 }, (_, i) =>
+				assistant(`reply number ${i}`),
+			);
+
+			const subject = viewer({ rows: 12 });
+			subject.handleInput(UP);
+			expect(plain(subject).at(-1)).toContain("[↑1]");
+
+			subject.handleInput(DOWN);
+			expect(plain(subject).at(-1)).not.toContain("[↑");
+		});
+
+		it("resets scroll offset to 0 when submitting a steering message", () => {
+			session.messages = Array.from({ length: 30 }, (_, i) =>
+				assistant(`reply number ${i}`),
+			);
+
+			const subject = viewer({ rows: 12 });
+			subject.handleInput(PAGE_UP);
+			expect(plain(subject).at(-1)).toContain("[↑");
+
+			type(subject, "look closer");
+			subject.handleInput(ENTER);
+
+			expect(plain(subject).at(-1)).not.toContain("[↑");
 		});
 	});
 

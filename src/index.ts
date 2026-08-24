@@ -74,37 +74,6 @@ export const LIST_TOOL_NAME = "list_subagents";
  */
 const MAX_WAIT_MS = 10 * 60_000;
 
-/**
- * How much of the terminal the open subagent panel takes.
- *
- * Wide enough for a transcript to read as prose, and small enough that the
- * session it belongs to — its prompt, and the list of subagents under it —
- * stays visible around it.
- */
-const OVERLAY_WIDTH_PERCENT = 80;
-const OVERLAY_HEIGHT_PERCENT = 70;
-
-/** What pi is told the panel's overlay may take up. */
-export const OVERLAY_SIZE = {
-	width: `${OVERLAY_WIDTH_PERCENT}%`,
-	maxHeight: `${OVERLAY_HEIGHT_PERCENT}%`,
-} as const;
-
-/**
- * The rows `OVERLAY_SIZE.maxHeight` comes to on a terminal this tall.
- *
- * Pi's own arithmetic for a percentage (`parseSizeValue`), not an
- * approximation of it, and derived from the same constant it is — the two must
- * agree. Pi slices an overlay that renders past its height from the bottom
- * (`@earendil-works/pi-tui/dist/tui.js:819`), and the bottom of this panel is
- * its prompt and its keys, so a panel that sizes itself to the terminal while
- * its overlay shows seven tenths of one loses precisely the parts the user
- * steers with — and loses them silently, which is how it reached a live run.
- */
-export function overlayRows(terminalRows: number): number {
-	return Math.max(1, Math.floor((terminalRows * OVERLAY_HEIGHT_PERCENT) / 100));
-}
-
 /** Identifies the list widget to pi, so remounting replaces it rather than
  * stacking a second copy below the first. */
 export const SUBAGENT_LIST_WIDGET = "pi-subagents:list";
@@ -1188,7 +1157,7 @@ export default function (pi: ExtensionAPI): void {
 		}
 
 		/**
-		 * Show one subagent's conversation over the session, until it is closed.
+		 * Show one subagent's conversation in a full TUI view, until it is closed.
 		 *
 		 * `ctx.ui.custom` hands the view the keyboard and resolves when the view
 		 * calls the `done` it was given, which is what the list waits on before it
@@ -1205,19 +1174,13 @@ export default function (pi: ExtensionAPI): void {
 						cwd: ctx.cwd,
 						// Read each time rather than captured, so a terminal resized
 						// while the panel is open resizes the panel with it.
-						rows: () => overlayRows(tui.terminal.rows),
+						rows: () => tui.terminal.rows,
 						close: () => done(),
 						steer: (steering, message) =>
 							steerSubagent(steering, message, { registry }),
 						stop: (stopping) =>
 							stopFromUi(stopping, { registry, queue }, sendMessage),
 					}),
-				{
-					overlay: true,
-					// The same size the panel inside was sized to, from the same
-					// constant. See `overlayRows` for what disagreeing costs.
-					overlayOptions: OVERLAY_SIZE,
-				},
 			);
 
 		ctx.ui.setWidget(

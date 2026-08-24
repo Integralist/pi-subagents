@@ -18,8 +18,6 @@ import extension, {
 	createResultTool,
 	createSpawnTool,
 	LIST_TOOL_NAME,
-	OVERLAY_SIZE,
-	overlayRows,
 	RESULT_TOOL_NAME,
 	SPAWN_TOOL_NAME,
 	STEER_TOOL_NAME,
@@ -1814,38 +1812,5 @@ describe("compact tool results", () => {
 
 		expect(draw(resultTool, result, false)).toEqual(["reviewer — completed"]);
 		expect(draw(resultTool, result, true).join("\n")).toContain("looks fine");
-	});
-});
-
-/**
- * The two halves of the panel's size, which have to agree.
- *
- * They did not, and it took a live run to notice: the panel sized itself to the
- * terminal while its overlay showed a fraction of one, so pi sliced the excess
- * off the bottom — the prompt row and the key rail — and the panel looked like
- * one you could only escape from.
- */
-describe("overlay size", () => {
-	/** Pi's own reading of a percentage (`pi-tui/dist/tui.js:24`). */
-	function piWouldAllow(terminalRows: number): number {
-		const percent = Number.parseFloat(OVERLAY_SIZE.maxHeight);
-		return Math.floor((terminalRows * percent) / 100);
-	}
-
-	it("gives the panel exactly the rows its overlay will show", () => {
-		for (const terminalRows of [10, 24, 40, 51, 120]) {
-			expect(overlayRows(terminalRows)).toBe(piWouldAllow(terminalRows));
-		}
-	});
-
-	/** A zero-row panel renders nothing at all, which reads as a broken open. */
-	it("keeps a row for a terminal too short to divide", () => {
-		expect(overlayRows(1)).toBe(1);
-		expect(overlayRows(0)).toBe(1);
-	});
-
-	it("leaves the session around it on screen", () => {
-		expect(overlayRows(40)).toBeLessThan(40);
-		expect(Number.parseFloat(OVERLAY_SIZE.width)).toBeLessThan(100);
 	});
 });

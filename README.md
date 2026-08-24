@@ -71,7 +71,7 @@ That is the four checks this repository holds itself to:
 
 | Target            | What it does                                     |
 | ----------------- | ------------------------------------------------ |
-| `make test`       | 581 tests under `vitest`                         |
+| `make test`       | 587 tests under `vitest`                         |
 | `make typecheck`  | `tsc --noEmit`                                   |
 | `make lint`       | `biome check src test`                           |
 | `make load-check` | loads the extension through pi's own jiti loader |
@@ -268,22 +268,22 @@ as usual. Each press moves one row, including under terminals that report key
 releases as well as presses.
 
 Opening a subagent shows its conversation as pi draws its own — markdown, tool
-calls, and their output — inside a framed panel over the session, and follows it
-as it works. It stays open when the subagent finishes, which is usually when the
+calls, and their output — inside a framed full-terminal view, and follows it as
+it works. It stays open when the subagent finishes, which is usually when the
 answer is worth reading.
 
-The panel's rails carry what explains it: the subagent's name, status and
-context use along the top, the keys along the bottom. A prompt sits at its foot
-for as long as the subagent can still be reached — there is nothing to press to
-get one, and it goes when the subagent finishes. It takes 80% of the terminal's
-width and 70% of its height, so the session it was opened from stays visible
-around it.
+The view's rails carry what explains it: the subagent's name, status and context
+use along the top, the keys and scroll position along the bottom. A prompt sits
+at its foot for as long as the subagent can still be reached — there is nothing
+to press to get one, and it goes when the subagent finishes.
 
-| Key      | In the open conversation                             |
-| -------- | ---------------------------------------------------- |
-| type     | Goes to the prompt; `enter` sends it to the subagent |
-| `ctrl+x` | Stop it                                              |
-| `escape` | Clear the prompt, then close the view                |
+| Key                   | In the open conversation                             |
+| --------------------- | ---------------------------------------------------- |
+| `↑` `↓` `pgup` `pgdn` | Scroll transcript history                            |
+| `home` `end`          | Jump to top / bottom of transcript                   |
+| type                  | Goes to the prompt; `enter` sends it to the subagent |
+| `ctrl+x`              | Stop it                                              |
+| `escape`              | Clear the prompt, then close the view                |
 
 ## Talking to a subagent directly
 

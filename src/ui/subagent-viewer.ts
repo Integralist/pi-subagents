@@ -64,8 +64,8 @@ const RAIL_CHROME = 3;
 const ROW_CHROME = 4;
 
 /** What the bottom rail offers, by whether the subagent can still be reached. */
-const LIVE_HINTS = "enter steer · ctrl+x stop · esc close";
-const FINISHED_HINTS = "esc close";
+const LIVE_HINTS = "scroll · enter steer · ctrl+x stop · esc close";
+const FINISHED_HINTS = "scroll · esc close";
 
 export interface SubagentViewerOptions {
 	record: SubagentRecord;
@@ -119,6 +119,10 @@ export class SubagentViewer implements Component {
 	#notice: string | undefined;
 	/** Whether this view is already listening to the child's session. */
 	#subscribed = false;
+	/** Number of lines scrolled up from the bottom. 0 means pinned to the latest output. */
+	#scrollOffset = 0;
+	/** Number of transcript lines visible in the last render pass. */
+	#lastBudget = 0;
 
 	constructor(options: SubagentViewerOptions) {
 		this.#options = options;
@@ -188,34 +192,33 @@ export class SubagentViewer implements Component {
 		// conversation's. `slice(-0)` returns the whole array rather than none of
 		// it, so a budget of zero is taken as the special case it is.
 		const budget = Math.max(0, rows - 2 - foot.length);
+		this.#lastBudget = budget;
 
-		// The tail, not the head: a view that follows a working subagent has to
-		// show what it just said. Anything older has scrolled off, which is what
-		// the transcript on disk is for.
-		const shown = budget === 0 ? [] : body.slice(-budget);
+		// Clamp scroll offset to valid bounds.
+		const maxScroll = Math.max(0, body.length - budget);
+		this.#scrollOffset = Math.min(this.#scrollOffset, maxScroll);
+
+		const startIndex = Math.max(0, body.length - budget - this.#scrollOffset);
+		const endIndex = Math.min(body.length, startIndex + budget);
+		const shown = budget === 0 ? [] : body.slice(startIndex, endIndex);
 
 		// Padded to the full budget, above the conversation, so the panel is the
 		// same height in every frame and what was said last sits against the
-		// prompt. A panel that grew and shrank with its transcript left its
-		// taller self on screen: pi renders differentially and skips the pass
-		// that clears rows nothing covers any more while an overlay is up
-		// (`pi-tui/dist/tui-main-screen.js:255`), which is how one panel came to
-		// be three stacked title bars.
+		// prompt.
 		const filler = Array.from({ length: budget - shown.length }, () =>
 			this.#row("", width),
 		);
+
+		const scrollBadge =
+			this.#scrollOffset > 0 ? ` [↑${this.#scrollOffset}]` : "";
+		const bottomLabel = (live ? LIVE_HINTS : FINISHED_HINTS) + scrollBadge;
 
 		const lines = [
 			this.#header(width),
 			...filler,
 			...shown,
 			...foot,
-			this.#rail(
-				FRAME.bottomLeft,
-				FRAME.bottomRight,
-				live ? LIVE_HINTS : FINISHED_HINTS,
-				width,
-			),
+			this.#rail(FRAME.bottomLeft, FRAME.bottomRight, bottomLabel, width),
 		];
 
 		// Never taller than the rows given. Pi slices an overlay that overruns
@@ -344,6 +347,11 @@ export class SubagentViewer implements Component {
 			: rows;
 	}
 
+	#pageStep(): number {
+		const budget = this.#lastBudget > 0 ? this.#lastBudget : this.#rows() - 4;
+		return Math.max(1, Math.floor(budget / 2));
+	}
+
 	handleInput(data: string): void {
 		// Taken before the prompt sees it, and taken whatever is half-typed: a
 		// subagent that should be stopped should not have to be stopped twice.
@@ -367,6 +375,59 @@ export class SubagentViewer implements Component {
 			return;
 		}
 
+		// Page navigation & scrolling
+		const isPageUp =
+			matchesKey(data, Key.pageUp) ||
+			matchesKey(data, Key.ctrl("u")) ||
+			matchesKey(data, Key.ctrl("b"));
+		const isPageDown =
+			matchesKey(data, Key.pageDown) ||
+			matchesKey(data, Key.ctrl("d")) ||
+			matchesKey(data, Key.ctrl("f"));
+		const isHome = matchesKey(data, Key.home);
+		const isEnd = matchesKey(data, Key.end);
+		const isUp = matchesKey(data, Key.up) || matchesKey(data, Key.shift("up"));
+		const isDown =
+			matchesKey(data, Key.down) || matchesKey(data, Key.shift("down"));
+
+		if (isPageUp) {
+			this.#scrollOffset += this.#pageStep();
+			this.#requestRender();
+			return;
+		}
+
+		if (isPageDown) {
+			this.#scrollOffset = Math.max(0, this.#scrollOffset - this.#pageStep());
+			this.#requestRender();
+			return;
+		}
+
+		if (isHome) {
+			this.#scrollOffset = Number.MAX_SAFE_INTEGER;
+			this.#requestRender();
+			return;
+		}
+
+		if (isEnd) {
+			this.#scrollOffset = 0;
+			this.#requestRender();
+			return;
+		}
+
+		if (isUp && (!live || this.#input.getValue() === "")) {
+			this.#scrollOffset += 1;
+			this.#requestRender();
+			return;
+		}
+
+		if (isDown && (!live || this.#input.getValue() === "")) {
+			if (this.#scrollOffset > 0) {
+				this.#scrollOffset -= 1;
+				this.#requestRender();
+				return;
+			}
+		}
+
 		// Nothing to type to. A finished subagent's view is for reading, and its
 		// keys are the ones the bottom rail names.
 		if (!live) {
@@ -384,6 +445,7 @@ export class SubagentViewer implements Component {
 		}
 
 		this.#input.setValue("");
+		this.#scrollOffset = 0;
 		this.#notice = "Sending…";
 		this.#requestRender();
 		void this.#options.steer(this.#options.record, value).then((result) => {
