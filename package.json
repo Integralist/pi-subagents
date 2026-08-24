@@ -14,7 +14,7 @@
 	},
 	"files": [
 		"src",
-		"agents",
+		"examples",
 		"README.md",
 		"CONTEXT.md"
 	],

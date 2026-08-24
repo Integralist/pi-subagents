@@ -688,6 +688,12 @@ is one commit on `main`, made at the end of the turn that implements it.
   > down behaviour that shipped in the closed plan's Slice 1 and was
   > widened at `16ceed7`, neither time with a specification to point
   > at.
+  >
+  > [!NOTE]
+  > Updated 2026-08-24. Shipped agent tier removed in favour of two discovery
+  > tiers (`user` and `project`). Example agent files moved from `agents/` to
+  > `examples/`, `AgentSource` loses `"builtin"`, and discovery tests assert
+  > 2 tiers with a dedicated suite validating all `examples/*.md`.
 
 - [x] **Task 4.2**: Update the README.
 
@@ -720,16 +726,16 @@ is one commit on `main`, made at the end of the turn that implements it.
 
 ### Documentation
 
-- [ ] Update `README.md` for the spawn tool's new parameters,
+- [x] Update `README.md` for the spawn tool's new parameters,
   `list_subagents`, and the discovery tiers (Task 4.2)
 - [x] Add the ADRs under `docs/adr/` (Task 4.3 — done up front)
-- [ ] Correct this plan in place, as a `> [!NOTE]` under each task,
+- [x] Correct this plan in place, as a `> [!NOTE]` under each task,
   in the same commit as that task's code
 
 ### Verification
 
 - [x] `make verify` — tests, `tsc --noEmit`, `biome check`, and the load
-  through pi's own jiti loader (`Makefile:36`). 557 tests, all green.
+  through pi's own jiti loader (`Makefile:36`). 581 tests, all green.
 - [x] All spec acceptance criteria hold, via `make test`
 - [x] `mutate.py` reports every listed mutation caught, per slice — 15
   mutations across the three code slices, all caught, re-run against the

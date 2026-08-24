@@ -1,12 +1,17 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-	type AgentConfig,
-	builtinAgentsDir,
-	discoverAgents,
-} from "../src/agents.ts";
+import { type AgentConfig, discoverAgents } from "../src/agents.ts";
 
 /**
  * `getAgentDir()` reads this environment variable on every call, so setting it
@@ -18,7 +23,6 @@ let tmpRoot: string;
 let userAgentDir: string;
 let projectRoot: string;
 let projectAgentDir: string;
-let builtinAgentDir: string;
 let savedAgentDirEnv: string | undefined;
 
 beforeEach(() => {
@@ -30,11 +34,6 @@ beforeEach(() => {
 	projectRoot = join(tmpRoot, "project");
 	projectAgentDir = join(projectRoot, ".pi", "agents");
 	mkdirSync(projectAgentDir, { recursive: true });
-
-	// Empty, so the agents this extension ships cannot reach a test that is
-	// asserting on the two directories it set up itself.
-	builtinAgentDir = join(tmpRoot, "builtin", "agents");
-	mkdirSync(builtinAgentDir, { recursive: true });
 
 	savedAgentDirEnv = process.env[AGENT_DIR_ENV];
 	process.env[AGENT_DIR_ENV] = join(tmpRoot, "user-agent-dir");
@@ -57,9 +56,9 @@ function agent(name: string, description = `does ${name} things`): string {
 	return `---\nname: ${name}\ndescription: ${description}\n---\nYou are ${name}.\n`;
 }
 
-/** Discovery over the three temporary tiers, never the shipped one. */
+/** Discovery over the two temporary tiers. */
 function discover(cwd: string = projectRoot): AgentConfig[] {
-	return discoverAgents(cwd, builtinAgentDir);
+	return discoverAgents(cwd);
 }
 
 function byName(agents: AgentConfig[]): string[] {
@@ -175,75 +174,13 @@ describe("discoverAgents", () => {
 });
 
 /**
- * The tier that makes an installed extension useful on its first run. pi copies
- * no agents of its own — its package manager knows extensions, skills, prompts
- * and themes and nothing else — so without this a fresh install would have
- * nothing to delegate to.
+ * The example agent files themselves. This is what catches a typo in an example
+ * agent: a file missing `description`, or naming a tool pi does not have, is
+ * silently not an agent, and nothing else in the suite would notice.
  */
-describe("discoverAgents built-in tier", () => {
-	it("offers the agents shipped with the extension", () => {
-		writeAgent(builtinAgentDir, "explore.md", agent("explore"));
+describe("the example agent files", () => {
+	const EXAMPLES_DIR = fileURLToPath(new URL("../examples", import.meta.url));
 
-		expect(byName(discover())).toEqual(["explore"]);
-	});
-
-	it("marks them as built in, so the tool description can say so", () => {
-		writeAgent(builtinAgentDir, "explore.md", agent("explore"));
-
-		expect(discover()[0]?.source).toBe("builtin");
-	});
-
-	/** Someone who writes their own `explore.md` means to replace ours. */
-	it("lets a user's own agent of the same name win", () => {
-		writeAgent(
-			builtinAgentDir,
-			"explore.md",
-			agent("explore", "the shipped one"),
-		);
-		writeAgent(userAgentDir, "explore.md", agent("explore", "the user's own"));
-
-		const found = discover();
-
-		expect(found).toHaveLength(1);
-		expect(found[0]?.description).toBe("the user's own");
-		expect(found[0]?.source).toBe("user");
-	});
-
-	it("lets a project agent of the same name win too", () => {
-		writeAgent(
-			builtinAgentDir,
-			"explore.md",
-			agent("explore", "the shipped one"),
-		);
-		writeAgent(
-			projectAgentDir,
-			"explore.md",
-			agent("explore", "this project's"),
-		);
-
-		expect(discover()[0]?.description).toBe("this project's");
-		expect(discover()[0]?.source).toBe("project");
-	});
-
-	it("adds to the user's own agents rather than replacing them", () => {
-		writeAgent(builtinAgentDir, "explore.md", agent("explore"));
-		writeAgent(userAgentDir, "mine.md", agent("mine"));
-
-		expect(byName(discover())).toEqual(["explore", "mine"]);
-	});
-
-	it("is no obstacle when the shipped directory is missing", () => {
-		expect(discoverAgents(projectRoot, join(tmpRoot, "not-there"))).toEqual([]);
-	});
-});
-
-/**
- * The shipped files themselves, read through the real default rather than a
- * temporary directory. This is what catches a typo in an agent that ships: a
- * file missing `description`, or naming a tool pi does not have, is silently
- * not an agent, and nothing else in the suite would notice.
- */
-describe("the agents this extension ships", () => {
 	/** Every tool pi has, from `pi --help`. */
 	const PI_TOOLS = new Set([
 		"read",
@@ -255,26 +192,62 @@ describe("the agents this extension ships", () => {
 		"ls",
 	]);
 
-	/**
-	 * Discovered from a directory with no `.pi/agents` above it, so only the
-	 * shipped tier is in the answer. Called per test rather than once: `tmpRoot`
-	 * is made in `beforeEach`, after this suite is collected.
-	 */
-	function shippedAgents(): AgentConfig[] {
-		return discoverAgents(tmpRoot, builtinAgentsDir());
+	function exampleAgents(): Array<{
+		name: string;
+		description: string;
+		systemPrompt: string;
+		tools?: string[];
+		model?: string;
+		filePath: string;
+	}> {
+		const entries = readdirSync(EXAMPLES_DIR).filter((e) => e.endsWith(".md"));
+		const agents: Array<{
+			name: string;
+			description: string;
+			systemPrompt: string;
+			tools?: string[];
+			model?: string;
+			filePath: string;
+		}> = [];
+
+		for (const file of entries) {
+			const filePath = join(EXAMPLES_DIR, file);
+			const content = readFileSync(filePath, "utf8");
+			const { frontmatter, body } =
+				parseFrontmatter<Record<string, unknown>>(content);
+			if (
+				typeof frontmatter.name === "string" &&
+				typeof frontmatter.description === "string"
+			) {
+				const tools = Array.isArray(frontmatter.tools)
+					? (frontmatter.tools as string[])
+					: typeof frontmatter.tools === "string"
+						? (frontmatter.tools as string).split(",").map((t) => t.trim())
+						: undefined;
+				agents.push({
+					name: frontmatter.name,
+					description: frontmatter.description,
+					systemPrompt: body.trim(),
+					tools,
+					model:
+						typeof frontmatter.model === "string"
+							? frontmatter.model
+							: undefined,
+					filePath,
+				});
+			}
+		}
+
+		return agents;
 	}
 
-	it("are found where the extension ships them", () => {
-		const shipped = shippedAgents();
-
-		expect(shipped.length).toBeGreaterThan(0);
-		for (const found of shipped) {
-			expect(found.source).toBe("builtin");
-		}
+	it("are all found in examples/", () => {
+		const examples = exampleAgents();
+		expect(examples.length).toBe(9);
 	});
 
 	it("all parse, with a name, a description and a system prompt", () => {
-		for (const found of shippedAgents()) {
+		for (const found of exampleAgents()) {
 			expect(found.name, found.filePath).toMatch(/^[a-z][a-z0-9-]*$/);
 			expect(found.description.length, found.name).toBeGreaterThan(10);
 			expect(found.systemPrompt.length, found.name).toBeGreaterThan(50);
@@ -283,7 +256,7 @@ describe("the agents this extension ships", () => {
 
 	/** A tool pi does not have is dropped at spawn, leaving a weaker agent. */
 	it("ask only for tools pi actually has", () => {
-		for (const found of shippedAgents()) {
+		for (const found of exampleAgents()) {
 			for (const tool of found.tools ?? []) {
 				expect(PI_TOOLS, `${found.name} asks for ${tool}`).toContain(tool);
 			}
@@ -292,7 +265,7 @@ describe("the agents this extension ships", () => {
 
 	/** A model name that matches nothing refuses the spawn outright. */
 	it("name no model, so they run on whatever the session uses", () => {
-		for (const found of shippedAgents()) {
+		for (const found of exampleAgents()) {
 			expect(found.model, found.name).toBeUndefined();
 		}
 	});

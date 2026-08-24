@@ -593,11 +593,11 @@ Feature: Discovering agent files
 
 Two things also get direct unit tests, being self-contained with
 enough edge cases to earn them: fuzzy model-name resolution, and
-agent discovery — three tiers, name collisions, malformed files, and
+agent discovery — two tiers, name collisions, malformed files, and
 the walk up to the project's agent directory. Discovery's tests
-include a pass over the agents actually shipped with the extension,
-which is what catches a shipped file that fails to parse, names a
-tool Pi does not have, or names a model that would refuse the spawn.
+include a pass over the example agents in `examples/`, which is what
+catches an example file that fails to parse, names a tool Pi does not
+have, or names a model that would refuse the spawn.
 
 ## Implementation Decisions
 
@@ -705,16 +705,20 @@ tool Pi does not have, or names a model that would refuse the spawn.
 - **Effort level is passed through to the session** and clamped by Pi
   to what the chosen model supports.
 - **Subagents may be defined as Markdown files with YAML
-  frontmatter**, discovered from three places: the set shipped with
-  the extension, the user's own directory, and the project. This
-  format is shared by every existing implementation.
+  frontmatter**, discovered from two places: the user's own directory
+  (`~/.pi/agent/agents/`) and the project (`<project>/.pi/agents/`).
+  This format is shared by every existing implementation. Example
+  agent definitions live in `examples/` and can be copied into
+  either directory.
 - **Nearer definitions win a name collision**, the project beating
-  the user's directory and the user's directory beating the shipped
-  set, so a persona can be adapted by writing a file of the same name
-  rather than editing an installed package. The shipped set exists
-  because Pi installs no agents of its own and its package manager
-  knows nothing of them, so without it a freshly installed extension
-  would offer nothing to delegate to.
+  the user's directory, so a persona can be adapted by writing a file
+  in `.pi/agents/` rather than modifying user-wide agents.
+
+> [!NOTE]
+> Updated 2026-08-24. The built-in tier was removed so that installed
+> extensions do not introduce standing tool choices that compete with
+> personas described dynamically at spawn time. Shipped personas moved
+> to `examples/`.
 - **Discovery never throws.** It runs before the main agent can offer
   any subagent at all, so one unreadable or malformed file must not
   hide every other agent beside it.

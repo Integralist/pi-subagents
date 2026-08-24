@@ -1,18 +1,11 @@
 /**
  * Agent discovery.
  *
- * An agent is a Markdown file with YAML frontmatter. Files are read from three
- * places, each overriding the one before it on a name collision:
+ * An agent is a Markdown file with YAML frontmatter. Files are read from two
+ * places, project overriding user on a name collision:
  *
- *   1. `<extension>/agents/*.md` — the agents shipped with this extension
- *   2. `<agentDir>/agents/*.md` — the user's own agents, shared across projects
- *   3. `<project>/.pi/agents/*.md` — agents belonging to one checkout
- *
- * The shipped tier exists because pi installs no agents of its own. Its package
- * manager collects extensions, skills, prompts and themes from a package and
- * knows nothing of agents, so without this an installed extension would offer
- * the user nothing to delegate to until they had written an agent file. Lowest
- * precedence, so a user's own `explore.md` replaces the shipped one outright.
+ *   1. `<agentDir>/agents/*.md` — the user's own agents, shared across projects
+ *   2. `<project>/.pi/agents/*.md` — agents belonging to one checkout
  *
  * Nothing here throws. Discovery runs before the main agent can offer any
  * subagent at all, so one unreadable or malformed file must never hide every
@@ -27,7 +20,6 @@ import {
 	statSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	CONFIG_DIR_NAME,
@@ -36,15 +28,14 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 /**
- * Which of the three tiers an agent file came from, or that it came from no
- * file at all.
+ * Which tier an agent file came from, or that it came from no file at all.
  *
  * `inline` is load-bearing rather than descriptive: continuing a subagent
  * branches on it to decide whether to re-read a file or trust the definition
  * stored on the record. Nothing in this module produces it — a definition
  * supplied when a subagent is started does.
  */
-export type AgentSource = "builtin" | "user" | "project" | "inline";
+export type AgentSource = "user" | "project" | "inline";
 
 export interface AgentConfig {
 	name: string;
@@ -237,34 +228,12 @@ function findNearestProjectAgentsDir(cwd: string): string | undefined {
 }
 
 /**
- * The `agents/` directory that ships beside this source.
- *
- * Resolved from the module's own location rather than from the working
- * directory, because a session runs anywhere and the shipped agents are wherever
- * pi cloned or unpacked the extension.
- */
-export function builtinAgentsDir(): string {
-	return fileURLToPath(new URL("../agents", import.meta.url));
-}
-
-/**
  * Every agent available to this session, the nearest tier winning any name
  * collision, sorted by name so the tool description built from these names
  * does not shuffle between runs.
- *
- * `builtinDir` is a seam: the shipped agents are found by default, and a test
- * points it at a directory of its own so real files cannot leak into its
- * expectations.
  */
-export function discoverAgents(
-	cwd: string,
-	builtinDir: string = builtinAgentsDir(),
-): AgentConfig[] {
+export function discoverAgents(cwd: string): AgentConfig[] {
 	const byName = new Map<string, AgentConfig>();
-
-	for (const config of loadAgentsFromDir(builtinDir, "builtin")) {
-		byName.set(config.name, config);
-	}
 
 	for (const config of loadAgentsFromDir(
 		join(getAgentDir(), "agents"),

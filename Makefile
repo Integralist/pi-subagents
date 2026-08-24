@@ -40,7 +40,7 @@ try: ## Open a pi session with this extension loaded, for a live walkthrough
 
 agents: ## Copy the example agents into this project's .pi/agents (keeps yours)
 	@mkdir -p .pi/agents
-	@cp -n agents/*.md .pi/agents/ 2>/dev/null || true
+	@cp -n examples/*.md .pi/agents/ 2>/dev/null || true
 	@echo "example agents are in .pi/agents:" && ls .pi/agents
 
 clean: ## Remove build output and test scratch

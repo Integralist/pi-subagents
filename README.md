@@ -59,7 +59,7 @@ pi reads the `pi.extensions` field of `package.json`, so it picks up
 extension loader resolves `@earendil-works/*` and `typebox` to its own copies,
 so an installed extension needs no `node_modules` of its own.
 
-The agents in `agents/` come with it — see below.
+The agents in `examples/` can be copied in — see below.
 
 ## Testing your copy
 
@@ -71,7 +71,7 @@ That is the four checks this repository holds itself to:
 
 | Target            | What it does                                     |
 | ----------------- | ------------------------------------------------ |
-| `make test`       | 587 tests under `vitest`                         |
+| `make test`       | 581 tests under `vitest`                         |
 | `make typecheck`  | `tsc --noEmit`                                   |
 | `make lint`       | `biome check src test`                           |
 | `make load-check` | loads the extension through pi's own jiti loader |
@@ -80,18 +80,22 @@ That is the four checks this repository holds itself to:
 green suite does not prove pi can load the extension at all. `make watch` reruns
 the tests as you edit, and `make` on its own lists every target.
 
-## The agents that come with it
+## Example agents
 
-Nine agent files ship in `agents/`, and they are found without being installed
-or copied. Discovery reads three directories, each overriding the one before it:
+Nine example agent files live in `examples/` as starting points. Discovery
+reads two directories, project overriding user on a name collision:
 
-1. `<extension>/agents/*.md` — these, wherever pi put the extension
 1. `~/.pi/agent/agents/*.md` — yours, in every project
 1. `<project>/.pi/agents/*.md` — this checkout's
 
-A file of your own named `explore.md` replaces the shipped `explore` outright.
-`make agents` copies the shipped set into `.pi/agents/`, for when you would
-rather edit them than override them.
+To use the examples in your project, copy them into `.pi/agents/`:
+
+```bash
+make agents   # copies examples/*.md into .pi/agents/ (keeps existing files)
+```
+
+Or copy one into `~/.pi/agent/agents/` to make it available across every
+project.
 
 | Agent             | For                                                      |
 | ----------------- | -------------------------------------------------------- |
@@ -112,7 +116,7 @@ that a review skill expects. See "Running a dimension-split review" below.
 
 ## Defining a subagent
 
-An agent is a Markdown file with YAML frontmatter, in one of the three
+An agent is a Markdown file with YAML frontmatter, in one of the two
 directories above. A subagent can also be described in the spawn call rather
 than written down — see "Subagents with no file behind them" below.
 
@@ -306,8 +310,9 @@ reason it could not be delivered — appears as a notification.
 
 A code-review skill that splits a review across dimensions — behaviour,
 security, reliability, maintainability, plan adherence — has everything it needs
-here. The six review agents are the roles and the skill supplies the inputs, or
-the skill can carry its own roles as `system_prompt` and use no files at all.
+here. The six review agents in `examples/` are ready-to-use roles (copied into
+`.pi/agents/` or `~/.pi/agent/agents/`), or the skill can carry its own roles as
+`system_prompt` and use no files at all.
 
 The flow, once the skill has gathered the diff once into a temp file:
 
