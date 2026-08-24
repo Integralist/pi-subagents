@@ -10,6 +10,7 @@
  * handler, a keypress — can update the registry without waiting.
  */
 
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "./agents.ts";
 import type { SubagentOutcome } from "./runner.ts";
@@ -118,6 +119,10 @@ export interface SubagentRecord {
 	 */
 	contextPercent: number | null;
 	turns: number;
+	/** Model name or id used by this subagent. */
+	model?: string;
+	/** Thinking / reasoning effort level used by this subagent. */
+	thinkingLevel?: ThinkingLevel;
 }
 
 /**

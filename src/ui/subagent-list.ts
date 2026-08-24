@@ -141,11 +141,30 @@ function nameWidth(records: SubagentRecord[]): number {
 }
 
 /**
+ * Format the metadata tail for a subagent row: model, effort level, and context
+ * percentage.
+ */
+export function formatMeta(record: SubagentRecord): string {
+	const parts: string[] = [];
+	if (record.model && record.thinkingLevel) {
+		parts.push(`${record.model} (${record.thinkingLevel})`);
+	} else if (record.model) {
+		parts.push(record.model);
+	} else if (record.thinkingLevel) {
+		parts.push(`(${record.thinkingLevel})`);
+	}
+	if (record.contextPercent !== null) {
+		parts.push(`${Math.round(record.contextPercent)}%`);
+	}
+	return parts.join(" ");
+}
+
+/**
  * One row: status glyph, the subagent's name in its own colour, what it was
- * asked to do, and its context use.
+ * asked to do, its model, effort level, and context use.
  *
  * Padding is worked out from the plain text and applied to the coloured text,
- * so the escape codes never enter the arithmetic. The percentage is pinned to
+ * so the escape codes never enter the arithmetic. The metadata is pinned to
  * the right of the column and the description gives up whatever room it needs.
  */
 function renderRow(
@@ -157,20 +176,15 @@ function renderRow(
 ): string {
 	const mark = STATUS_MARK[record.status];
 	const name = truncateToWidth(record.handle, nameColumn, "…", true);
-	// Null is not zero: nobody knows the figure yet, so the column stays blank
-	// rather than claiming an empty context window.
-	const percent =
-		record.contextPercent === null
-			? ""
-			: `${Math.round(record.contextPercent)}%`;
+	const meta = formatMeta(record);
 
-	// mark, space, name, space — then the description, then the percentage
+	// mark, space, name, space — then the description, then the metadata
 	// preceded by its own space when there is one.
 	const used = visibleWidth(mark) + 1 + visibleWidth(name) + 1;
-	const tail = percent === "" ? 0 : visibleWidth(percent) + 1;
+	const tail = meta === "" ? 0 : visibleWidth(meta) + 1;
 	const room = Math.max(0, width - used - tail);
 
-	// Padded when a percentage follows, which is what right-aligns it, and when
+	// Padded when metadata follows, which is what right-aligns it, and when
 	// the row is selected, so the highlight is a solid block rather than a
 	// ragged one — the eye follows the block. Otherwise there is nothing to push
 	// over and the spaces would fill the row to the terminal's last column.
@@ -178,7 +192,7 @@ function renderRow(
 		record.description,
 		room,
 		"…",
-		percent !== "" || selected,
+		meta !== "" || selected,
 	);
 
 	const row = [
@@ -187,7 +201,7 @@ function renderRow(
 		colorize(record.color, name),
 		" ",
 		theme.fg("muted", description),
-		percent === "" ? "" : ` ${theme.fg("dim", percent)}`,
+		meta === "" ? "" : ` ${theme.fg("dim", meta)}`,
 	].join("");
 
 	return selected ? theme.bg("selectedBg", row) : row;

@@ -157,6 +157,30 @@ describe("SubagentList", () => {
 		expect(plain(list())[0]).toContain("13%");
 	});
 
+	it("shows the model name when present on the record", () => {
+		registry.add(record({ model: "claude-3-7-sonnet" }));
+
+		expect(plain(list())[0]).toContain("claude-3-7-sonnet");
+	});
+
+	it("shows the thinking level in parentheses when present", () => {
+		registry.add(record({ thinkingLevel: "high" }));
+
+		expect(plain(list())[0]).toContain("(high)");
+	});
+
+	it("shows model, effort level, and context percentage together", () => {
+		registry.add(
+			record({
+				model: "claude-3-7-sonnet",
+				thinkingLevel: "high",
+				contextPercent: 25,
+			}),
+		);
+
+		expect(plain(list())[0]).toContain("claude-3-7-sonnet (high) 25%");
+	});
+
 	/**
 	 * Ragged left edges are what make a list of short rows hard to scan, which is
 	 * the whole reason the list exists.

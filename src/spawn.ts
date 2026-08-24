@@ -363,6 +363,14 @@ export function startSubagent(opts: StartSubagentOptions): SubagentRecord {
 		now = Date.now,
 	} = opts;
 
+	const resolvedModel = opts.model ?? opts.ctx.model;
+	const model =
+		resolvedModel?.id ??
+		(resolvedModel as unknown as { name?: string })?.name ??
+		opts.config.model;
+	const thinkingLevel =
+		opts.thinkingLevel ?? opts.config.thinking ?? opts.ctx.thinkingLevel;
+
 	const record: SubagentRecord = {
 		id: newId(),
 		// Unique for the session, because `@reviewer` has to have exactly one
@@ -382,6 +390,8 @@ export function startSubagent(opts: StartSubagentOptions): SubagentRecord {
 		startedAt: now(),
 		contextPercent: null,
 		turns: 0,
+		model,
+		thinkingLevel,
 	};
 
 	registry.add(record);
@@ -419,8 +429,23 @@ export function resumeSubagent(opts: ResumeSubagentOptions): ResumeResult {
 	const stored = record.sessionFile;
 	const resumeFrom = stored && existsSync(stored) ? stored : undefined;
 
+	const resolvedModel = opts.model ?? opts.ctx.model;
+	const model =
+		resolvedModel?.id ??
+		(resolvedModel as unknown as { name?: string })?.name ??
+		opts.config.model ??
+		record.model;
+	const thinkingLevel =
+		opts.thinkingLevel ??
+		opts.config.thinking ??
+		opts.ctx.thinkingLevel ??
+		record.thinkingLevel;
+
 	registry.update(record.id, {
+		config: opts.config,
 		status: "queued",
+		model,
+		thinkingLevel,
 		// Cleared, or the record reads as finished while it runs again and
 		// `get_subagent_result` hands the old answer back as this run's.
 		outcome: undefined,

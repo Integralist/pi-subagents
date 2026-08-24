@@ -1,6 +1,8 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import type {
 	AgentSessionEvent,
 	ExtensionContext,
@@ -125,6 +127,8 @@ interface StartOptions {
 	registry?: SubagentRegistry;
 	id?: string;
 	queue?: SubagentQueue;
+	model?: Model<Api>;
+	thinkingLevel?: ThinkingLevel;
 }
 
 function start(
@@ -142,6 +146,8 @@ function start(
 		queue: options.queue ?? new SubagentQueue(5),
 		sendMessage: send.sendMessage as unknown as SendMessage,
 		run: run.run,
+		model: options.model,
+		thinkingLevel: options.thinkingLevel,
 		newId: () => options.id ?? "abc123",
 		now: () => 1_000,
 	});
@@ -197,6 +203,16 @@ describe("startSubagent", () => {
 		const { record } = start(run, send, { config });
 
 		expect(record.config).toEqual(config);
+	});
+
+	it("records the model and thinking level on the record", () => {
+		const { record } = start(run, send, {
+			model: { id: "claude-3-7-sonnet", provider: "anthropic" } as never,
+			thinkingLevel: "high",
+		});
+
+		expect(record.model).toBe("claude-3-7-sonnet");
+		expect(record.thinkingLevel).toBe("high");
 	});
 
 	/**
