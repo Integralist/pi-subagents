@@ -181,7 +181,7 @@ references (`path/to/file.ts:42`) and outline unexamined areas.
 
 Pi discovers agent files across two tiers (project overrides user on collision):
 
-1. `~/.pi/agent/agents/*.md` — User agents available across all checkouts
+1. `~/.pi/agent/agents/*.md` — User agents available globally
 2. `<project>/.pi/agents/*.md` — Project-specific agents
 
 ### Example Agents
