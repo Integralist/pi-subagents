@@ -66,8 +66,16 @@ make install   # npm install
 make try       # launches pi with this extension loaded
 ```
 
-Ask the model to delegate a task: _"Use a subagent to search for tool definitions
-in src/"_.
+Prompt the model to delegate work, optionally specifying a model or thinking
+effort:
+
+- _"Use a subagent to search for tool definitions in src/"_
+- _"Have a subagent review src/queue.ts using gemini with high effort"_
+- _"Spawn a subagent running haiku with thinking off to count lines in tests"_
+
+Model queries resolve fuzzily against configured providers (e.g. `"flash"`,
+`"haiku"`, `"gemini 3.7"`). If a loose query matches multiple configured models,
+an interactive selection dialog appears in the terminal to pick the exact one.
 
 ## Interacting with Subagents
 
