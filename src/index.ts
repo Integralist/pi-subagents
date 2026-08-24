@@ -506,8 +506,23 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 			// No guard on an empty agent list: a project with no agent files can
 			// still delegate by supplying a character, and `resolveSpawnConfig`
 			// refuses a call that does neither.
-			const agents = deps.discover(ctx.cwd);
-			const config = resolveSpawnConfig(params, agents);
+			let config: AgentConfig;
+			try {
+				const agents = deps.discover(ctx.cwd);
+				config = resolveSpawnConfig(params, agents);
+			} catch (error) {
+				const text = `Refusal: ${describeCause(error)}`;
+				return {
+					content: [{ type: "text" as const, text }],
+					details: {
+						id: "",
+						agent: params.subagent_type || params.name || "spawn_subagent",
+						status: "failed",
+						description: params.description || "configuration error",
+						unknownTools: [],
+					} satisfies SpawnDetails,
+				};
+			}
 
 			const { tools, unknownTools } = checkToolNames(
 				config.tools,
@@ -516,12 +531,29 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 
 			// Resolved before the run starts, so an unusable model name refuses
 			// the call instead of failing partway into a session.
-			const choice = await chooseModel(
-				ctx,
-				config.name,
-				params.model ?? config.model,
-				signal,
-			);
+			let choice: ModelChoice;
+			try {
+				choice = await chooseModel(
+					ctx,
+					config.name,
+					params.model ?? config.model,
+					signal,
+				);
+			} catch (error) {
+				const text = `Refusal: ${describeCause(error)}`;
+				return {
+					content: [{ type: "text" as const, text }],
+					details: {
+						id: "",
+						agent: config.name,
+						status: "failed",
+						description: params.description,
+						unknownTools: [],
+					} satisfies SpawnDetails,
+				};
+			}
+
+			const agents = deps.discover(ctx.cwd);
 
 			// Not awaited: the subagent is launched and the call is over. Its answer
 			// comes back as a message of its own when there is one.
@@ -568,6 +600,15 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 					unknownTools,
 				} satisfies SpawnDetails,
 			};
+		},
+
+		renderResult: (result, options, theme) => {
+			const details = result.details as SpawnDetails | undefined;
+			const summary =
+				details?.status === "failed"
+					? `${details?.agent || "spawn_subagent"} — configuration error`
+					: `${details?.agent || "subagent"} (${details?.id || ""}) — ${details?.status || "started"}`;
+			return compactResult(result, options, theme, summary);
 		},
 	});
 }

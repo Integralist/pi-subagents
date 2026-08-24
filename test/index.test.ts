@@ -564,16 +564,15 @@ describe("spawn_subagent", () => {
 			],
 		});
 
-		await expect(
-			tool.execute(
-				"call-1",
-				{ ...VALID_ARGS, subagent_type: "nonexistent" },
-				undefined,
-				undefined,
-				ctx,
-			),
-		).rejects.toThrow(/reviewer.*tester|tester.*reviewer/s);
+		const result = await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, subagent_type: "nonexistent" },
+			undefined,
+			undefined,
+			ctx,
+		);
 
+		expect(resultText(result)).toMatch(/reviewer.*tester|tester.*reviewer/s);
 		// And no subagent starts.
 		expect(run).not.toHaveBeenCalled();
 	});
@@ -586,10 +585,15 @@ describe("spawn_subagent", () => {
 	it("refuses clearly when no agents are defined at all", async () => {
 		const { tool, run } = harness({ agents: [] });
 
-		await expect(
-			tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx),
-		).rejects.toThrow(/no agent files/i);
+		const result = await tool.execute(
+			"call-1",
+			VALID_ARGS,
+			undefined,
+			undefined,
+			ctx,
+		);
 
+		expect(resultText(result)).toMatch(/no agent files/i);
 		expect(run).not.toHaveBeenCalled();
 	});
 
@@ -784,16 +788,17 @@ describe("spawn_subagent model and effort overrides", () => {
 	it("Refuses an unknown model name", async () => {
 		const { tool, run } = harness();
 
-		await expect(
-			tool.execute(
-				"call-1",
-				{ ...VALID_ARGS, model: "nope" },
-				undefined,
-				undefined,
-				ctx,
-			),
-		).rejects.toThrow(/gemini-2\.5-flash[\s\S]*claude-opus-4-5/);
+		const result = await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "nope" },
+			undefined,
+			undefined,
+			ctx,
+		);
 
+		expect(resultText(result)).toMatch(
+			/gemini-2\.5-flash[\s\S]*claude-opus-4-5/,
+		);
 		// And no subagent starts.
 		expect(run).not.toHaveBeenCalled();
 	});
@@ -874,10 +879,15 @@ describe("spawn_subagent model and effort overrides", () => {
 			agents: [agentConfig({ model: "hallucinated-model" })],
 		});
 
-		await expect(
-			tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx),
-		).rejects.toThrow(/hallucinated-model/);
+		const result = await tool.execute(
+			"call-1",
+			VALID_ARGS,
+			undefined,
+			undefined,
+			ctx,
+		);
 
+		expect(resultText(result)).toMatch(/hallucinated-model/);
 		expect(run).not.toHaveBeenCalled();
 	});
 
@@ -957,16 +967,15 @@ describe("spawn_subagent model candidates", () => {
 			all: [...CATALOGUE, fakeModel("nowhere", "made-up-foo-flash")],
 		});
 
-		await expect(
-			tool.execute(
-				"call-1",
-				{ ...VALID_ARGS, model: "made-up-foo-flash" },
-				undefined,
-				undefined,
-				ctx,
-			),
-		).rejects.toThrow(/unknown model/i);
+		const result = await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "made-up-foo-flash" },
+			undefined,
+			undefined,
+			ctx,
+		);
 
+		expect(resultText(result)).toMatch(/unknown model/i);
 		expect(run).not.toHaveBeenCalled();
 	});
 
@@ -1085,16 +1094,15 @@ describe("spawn_subagent ambiguous model selection", () => {
 		const { tool, run } = harness();
 		ctx = fakeContext({ scoped: [FLASH_36, FLASH_37], hasUI: false });
 
-		await expect(
-			tool.execute(
-				"call-1",
-				{ ...VALID_ARGS, model: "flash" },
-				undefined,
-				undefined,
-				ctx,
-			),
-		).rejects.toThrow(/matches more than one/i);
+		const result = await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "flash" },
+			undefined,
+			undefined,
+			ctx,
+		);
 
+		expect(resultText(result)).toMatch(/matches more than one/i);
 		// Blocking on a dialog nobody can see would hang a headless run.
 		expect(selectCalls).toHaveLength(0);
 		expect(run).not.toHaveBeenCalled();
@@ -1104,16 +1112,15 @@ describe("spawn_subagent ambiguous model selection", () => {
 		const { tool } = harness();
 		ctx = fakeContext({ scoped: [FLASH_36, FLASH_37] });
 
-		await expect(
-			tool.execute(
-				"call-1",
-				{ ...VALID_ARGS, model: "totally-absent" },
-				undefined,
-				undefined,
-				ctx,
-			),
-		).rejects.toThrow(/unknown model/i);
+		const result = await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, model: "totally-absent" },
+			undefined,
+			undefined,
+			ctx,
+		);
 
+		expect(resultText(result)).toMatch(/unknown model/i);
 		expect(selectCalls).toHaveLength(0);
 	});
 
@@ -1377,16 +1384,15 @@ describe("spawn_subagent with a supplied character", () => {
 	it("refuses a call that neither names a type nor supplies a character", async () => {
 		const { tool, run } = harness();
 
-		await expect(
-			tool.execute(
-				"call-1",
-				{ prompt: "check the auth path", description: "security review" },
-				undefined,
-				undefined,
-				ctx,
-			),
-		).rejects.toThrow(/subagent_type|system_prompt/);
+		const result = await tool.execute(
+			"call-1",
+			{ prompt: "check the auth path", description: "security review" },
+			undefined,
+			undefined,
+			ctx,
+		);
 
+		expect(resultText(result)).toMatch(/subagent_type|system_prompt/);
 		expect(run).not.toHaveBeenCalled();
 	});
 
@@ -1827,5 +1833,39 @@ describe("compact tool results", () => {
 
 		expect(draw(resultTool, result, false)).toEqual(["reviewer — completed"]);
 		expect(draw(resultTool, result, true).join("\n")).toContain("looks fine");
+	});
+
+	it("draws a started subagent as a compact one line", async () => {
+		const { tool } = harness({ hang: true });
+		const result = await tool.execute(
+			"call-1",
+			VALID_ARGS,
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(draw(tool, result, false)).toEqual(["reviewer (sub-1) — running"]);
+		expect(draw(tool, result, true).join("\n")).toContain(
+			'Subagent "reviewer" started with id sub-1',
+		);
+	});
+
+	it("draws a spawn configuration refusal as a compact line", async () => {
+		const { tool } = harness();
+		const result = await tool.execute(
+			"call-1",
+			{ prompt: "do something", description: "missing type" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(draw(tool, result, false)).toEqual([
+			"spawn_subagent — configuration error",
+		]);
+		expect(draw(tool, result, true).join("\n")).toContain(
+			"Refusal: Name a subagent_type from the list",
+		);
 	});
 });
