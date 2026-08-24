@@ -36,7 +36,7 @@ load-check: ## Load the extension through pi's own loader, as pi will
 verify: test typecheck lint load-check ## Everything above, in one go
 
 try: ## Open a pi session with this extension loaded, for a live walkthrough
-	$(PI) -e ./src/index.ts
+	$(PI) -ne -e ./src/index.ts
 
 agents: ## Copy the example agents into this project's .pi/agents (keeps yours)
 	@mkdir -p .pi/agents
