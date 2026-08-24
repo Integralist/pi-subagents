@@ -413,6 +413,8 @@ export class SubagentList implements Component {
 				.join(" ".repeat(GUTTER));
 			lines.push(line.trimEnd());
 		}
+		// Spacer row between the subagent list and the status bar.
+		lines.push("");
 		return lines;
 	}
 

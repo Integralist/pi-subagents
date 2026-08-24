@@ -114,14 +114,15 @@ describe("SubagentList", () => {
 
 		const lines = plain(list());
 
-		// The list shows 3 rows below the prompt.
-		expect(lines).toHaveLength(3);
+		// The list shows 3 rows below the prompt plus a trailing spacer row.
+		expect(lines).toHaveLength(4);
+		expect(lines[3]).toBe("");
 		// And each row shows its subagent's name.
 		expect(lines[0]).toContain("agent0");
 		expect(lines[1]).toContain("agent1");
 		expect(lines[2]).toContain("agent2");
 		// And each row shows its context-window use as a percentage.
-		for (const line of lines) {
+		for (const line of lines.slice(0, 3)) {
 			expect(line).toContain("12%");
 		}
 	});
@@ -197,7 +198,7 @@ describe("SubagentList", () => {
 					}),
 				);
 			});
-			return plain(list());
+			return plain(list()).filter(Boolean);
 		}
 
 		it("starts every description in the same column", () => {
@@ -298,7 +299,7 @@ describe("SubagentList", () => {
 			({ count, lines }) => {
 				addRunning(count);
 
-				expect(plain(list(), 200)).toHaveLength(lines);
+				expect(plain(list(), 200)).toHaveLength(lines + 1);
 			},
 		);
 
@@ -352,7 +353,7 @@ describe("SubagentList", () => {
 		it("fills five per column by default", () => {
 			addRunning(6);
 
-			expect(plain(list(), 200)).toHaveLength(ROWS_PER_COLUMN);
+			expect(plain(list(), 200)).toHaveLength(ROWS_PER_COLUMN + 1);
 		});
 	});
 
@@ -361,7 +362,7 @@ describe("SubagentList", () => {
 		it("Gives each subagent its own colour", () => {
 			addRunning(3);
 
-			const lines = list().render(80);
+			const lines = list().render(80).filter(Boolean);
 
 			// biome-ignore lint/suspicious/noControlCharactersInRegex: matching the escape is the point
 			const foreground = /\[3\dm/;
@@ -437,7 +438,7 @@ describe("SubagentList", () => {
 			clock = NOW + DEFAULT_LINGER_MS;
 			const lines = plain(list());
 
-			expect(lines).toHaveLength(1);
+			expect(lines).toHaveLength(2);
 			expect(lines[0]).toContain("agent1");
 		});
 
@@ -588,7 +589,7 @@ describe("SubagentList", () => {
 			// Nothing to unsubscribe, and disposing must still be safe.
 			expect(() => subject.dispose()).not.toThrow();
 			expect(() => addRunning(1)).not.toThrow();
-			expect(plain(subject)).toHaveLength(1);
+			expect(plain(subject)).toHaveLength(2);
 		});
 
 		describe("the keyboard", () => {
