@@ -1727,6 +1727,22 @@ That has a direct consequence for how the work is handed out.
   > pass, its rails carrying the subagent's name and the keys: pi's
   > overlays have no border, and without one the view read as more of
   > the conversation underneath it.
+  >
+  > **And the panel had to be told how tall its overlay is (2026-08-24).**
+  > The prompt was drawn from the first run of that change and still
+  > never appeared: `#rows()` fell back to `tui.terminal.rows` while
+  > `overlayOptions` allowed 85% of them, and pi cuts an overlay that
+  > overruns its height from the bottom (`pi-tui/dist/tui.js:819`) —
+  > which is where the prompt and the key rail are. `overlayRows()` and
+  > `OVERLAY_SIZE` in `src/index.ts` now come from one pair of
+  > constants, the panel is handed the rows that leaves it, and it fills
+  > them exactly rather than reserving four for a session the overlay
+  > was already keeping clear. The overlay also shrank to 80% by 70%, as
+  > the user asked. Two mutations survived the first pass, both hidden
+  > by the clamp that keeps an overlong panel inside its rows: counting
+  > lines cannot tell a panel that budgeted correctly from one that
+  > budgeted wrongly and was then cut back, so both tests now assert the
+  > top and bottom rails are still there.
 
 - [x] **Task 10.3**: Stay open when the subagent finishes.
 

@@ -327,17 +327,56 @@ describe("SubagentViewer", () => {
 		});
 
 		/**
-		 * The panel is an overlay, and one that filled the terminal would cover
-		 * the prompt it was opened from. The frame and the prompt row have to
-		 * come out of the conversation's share rather than out of that margin.
+		 * The rows it is given are the rows its overlay will show, and pi slices
+		 * an overlay that renders past that from the bottom
+		 * (`pi-tui/dist/tui.js:819`) — taking the prompt and the keys with it,
+		 * since those are the last two things drawn. Filling the panel exactly
+		 * is what keeps them on screen.
 		 */
-		it("leaves the session underneath room to show", () => {
+		it("fills the rows it was given, and never more", () => {
 			session.messages = Array.from({ length: 30 }, (_, i) =>
 				assistant(`reply number ${i}`),
 			);
 
-			// Four rows, the margin the view has always kept for the session.
-			expect(plain(viewer({ rows: 20 })).length).toBeLessThanOrEqual(16);
+			const lines = plain(viewer({ rows: 20 }));
+
+			expect(lines.length).toBe(20);
+			// Both ends, not just the count: a panel that budgeted wrongly and was
+			// then cut back to the right height would still count 20, having lost
+			// its top rail — which is the subagent's name and status.
+			expect(lines[0]?.startsWith("┏")).toBe(true);
+			expect(lines.at(-1)?.startsWith("┗")).toBe(true);
+		});
+
+		/**
+		 * The rows given are exactly the frame, the rule and the prompt, with
+		 * nothing over for the conversation. The panel is still whole; it is the
+		 * transcript that gives way.
+		 */
+		it("keeps the whole frame when only the frame fits", () => {
+			session.messages = Array.from({ length: 30 }, (_, i) =>
+				assistant(`reply number ${i}`),
+			);
+
+			const lines = plain(viewer({ rows: 4 }));
+
+			expect(lines.length).toBe(4);
+			expect(lines[0]?.startsWith("┏")).toBe(true);
+			expect(lines.at(-1)?.startsWith("┗")).toBe(true);
+		});
+
+		/**
+		 * Nothing sensible fits in three rows, but the panel must still not
+		 * overflow — and what survives should be its end, because that is where
+		 * the prompt and the keys are.
+		 */
+		it("keeps the prompt end when there is no room for the frame", () => {
+			session.messages = [assistant("No race here.")];
+
+			const lines = plain(viewer({ rows: 3 }));
+
+			expect(lines.length).toBeLessThanOrEqual(3);
+			expect(lines.at(-1)?.startsWith("┗")).toBe(true);
 		});
 
 		/**

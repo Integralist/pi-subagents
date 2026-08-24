@@ -39,17 +39,6 @@ import {
 import { STATUS_COLOR, STATUS_MARK } from "./status.ts";
 import { Transcript } from "./transcript.ts";
 
-/** Rows the view keeps for the conversation when the terminal is tiny. */
-const MIN_BODY_ROWS = 3;
-
-/**
- * Rows the view leaves to the session underneath.
- *
- * An overlay that filled the terminal would hide the prompt it was opened from,
- * which is disorientating for a view that closes on one key.
- */
-const RESERVED_ROWS = 4;
-
 /**
  * The frame's glyphs, heavy throughout.
  *
@@ -191,22 +180,21 @@ export class SubagentViewer implements Component {
 
 	render(width: number): string[] {
 		const inner = Math.max(1, width - ROW_CHROME);
+		const rows = Math.max(1, this.#rows());
 		const live = !TERMINAL_STATUSES.has(this.#options.record.status);
 		const foot = this.#foot(width, inner, live);
 		const body = this.#body(inner).map((line) => this.#row(line, width));
-		// The two rails, whatever the foot came to, and the rows left to the
-		// session underneath. What is left is the conversation's.
-		const budget = Math.max(
-			MIN_BODY_ROWS,
-			this.#rows() - 2 - foot.length - RESERVED_ROWS,
-		);
+		// Two rails and whatever the foot came to. What is left is the
+		// conversation's. `slice(-0)` returns the whole array rather than none of
+		// it, so a budget of zero is taken as the special case it is.
+		const budget = Math.max(0, rows - 2 - foot.length);
 
 		// The tail, not the head: a view that follows a working subagent has to
 		// show what it just said. Anything older has scrolled off, which is what
 		// the transcript on disk is for.
-		return [
+		const lines = [
 			this.#header(width),
-			...body.slice(-budget),
+			...(budget === 0 ? [] : body.slice(-budget)),
 			...foot,
 			this.#rail(
 				FRAME.bottomLeft,
@@ -215,8 +203,23 @@ export class SubagentViewer implements Component {
 				width,
 			),
 		];
+
+		// Never taller than the rows given. Pi slices an overlay that overruns
+		// its height from the bottom (`pi-tui/dist/tui.js:819`), and the bottom
+		// of this panel is the prompt and the keys — so overrunning loses
+		// precisely the parts that are worth keeping. Only reachable on a
+		// terminal too short for the frame itself, where the end is what is worth
+		// keeping for the same reason.
+		return lines.length <= rows ? lines : lines.slice(-rows);
 	}
 
+	/**
+	 * Rows this panel may draw.
+	 *
+	 * Its overlay's height, not the terminal's: the two are not the same, and
+	 * the caller that sizes the overlay is the one that knows. Falling back to
+	 * the terminal keeps a viewer built without one — a test's — working.
+	 */
 	#rows(): number {
 		return this.#options.rows?.() ?? this.#options.tui.terminal.rows;
 	}

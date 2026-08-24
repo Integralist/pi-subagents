@@ -740,6 +740,14 @@ tool Pi does not have, or names a model that would refuse the spawn.
 > the user could not tell where the overlay began, and asked whether
 > steering was meant to happen through `@handle` from the main prompt.
 > It was on `enter`, and nothing on screen said so.
+>
+> Extended 2026-08-24, after the run that followed. The prompt was
+> drawn and still could not be seen: the panel sized itself to the
+> terminal while its overlay was told it could have a fraction of one,
+> and pi slices an overlay that overruns its height from the bottom —
+> taking the prompt and the keys, the last rows drawn. The panel is now
+> given the rows its overlay will actually show, from the same constant
+> that sizes the overlay, and fills them exactly.
 
 ## Out of Scope
 

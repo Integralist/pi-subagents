@@ -71,7 +71,7 @@ That is the four checks this repository holds itself to:
 
 | Target            | What it does                                     |
 | ----------------- | ------------------------------------------------ |
-| `make test`       | 577 tests under `vitest`                         |
+| `make test`       | 582 tests under `vitest`                         |
 | `make typecheck`  | `tsc --noEmit`                                   |
 | `make lint`       | `biome check src test`                           |
 | `make load-check` | loads the extension through pi's own jiti loader |
@@ -270,7 +270,9 @@ answer is worth reading.
 The panel's rails carry what explains it: the subagent's name, status and
 context use along the top, the keys along the bottom. A prompt sits at its foot
 for as long as the subagent can still be reached — there is nothing to press to
-get one, and it goes when the subagent finishes.
+get one, and it goes when the subagent finishes. It takes 80% of the terminal's
+width and 70% of its height, so the session it was opened from stays visible
+around it.
 
 | Key      | In the open conversation                             |
 | -------- | ---------------------------------------------------- |
