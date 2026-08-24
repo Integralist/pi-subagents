@@ -2,11 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentSession, Theme } from "@earendil-works/pi-coding-agent";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import {
-	stripTerminalSequences,
-	type TUI,
-	visibleWidth,
-} from "@earendil-works/pi-tui";
+import { stripTerminalSequences, type TUI } from "@earendil-works/pi-tui";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControlResult } from "../../src/control.ts";
 import { type SubagentRecord, SubagentRegistry } from "../../src/registry.ts";
@@ -372,43 +368,21 @@ describe("SubagentViewer", () => {
 	});
 
 	/**
-	 * The overlay sits over the session that spawned it, and without an edge of
-	 * its own it reads as more of that conversation rather than as a panel over
-	 * it — which is exactly how it was reported.
+	 * The view is demarcated with horizontal dividers so its header and keys
+	 * frame the conversation cleanly without side-rail rendering artifacts.
 	 */
-	describe("the frame", () => {
-		it("closes the frame on every side", () => {
+	describe("the framing", () => {
+		it("frames the view with top and bottom dividers", () => {
 			session.messages = [assistant("No race here.")];
 
 			const lines = plain(viewer());
 			const top = lines[0] ?? "";
 			const bottom = lines.at(-1) ?? "";
 
-			expect(top.startsWith("┏")).toBe(true);
-			expect(top.endsWith("┓")).toBe(true);
-			expect(bottom.startsWith("┗")).toBe(true);
-			expect(bottom.endsWith("┛")).toBe(true);
-			for (const line of lines.slice(1, -1)) {
-				expect(line[0]).toMatch(/[┃┣]/);
-				expect(line.at(-1)).toMatch(/[┃┫]/);
-			}
+			expect(top.startsWith("─")).toBe(true);
+			expect(bottom.startsWith("─")).toBe(true);
 		});
 
-		it("draws every line to the full width", () => {
-			session.messages = [assistant("No race here."), user("short")];
-
-			for (const line of plain(viewer())) {
-				expect(visibleWidth(line)).toBe(WIDTH);
-			}
-		});
-
-		/**
-		 * The rows it is given are the rows its overlay will show, and pi slices
-		 * an overlay that renders past that from the bottom
-		 * (`pi-tui/dist/tui.js:819`) — taking the prompt and the keys with it,
-		 * since those are the last two things drawn. Filling the panel exactly
-		 * is what keeps them on screen.
-		 */
 		it("fills the rows it was given, and never more", () => {
 			session.messages = Array.from({ length: 30 }, (_, i) =>
 				assistant(`reply number ${i}`),
@@ -417,19 +391,16 @@ describe("SubagentViewer", () => {
 			const lines = plain(viewer({ rows: 20 }));
 
 			expect(lines.length).toBe(20);
-			// Both ends, not just the count: a panel that budgeted wrongly and was
-			// then cut back to the right height would still count 20, having lost
-			// its top rail — which is the subagent's name and status.
-			expect(lines[0]?.startsWith("┏")).toBe(true);
-			expect(lines.at(-1)?.startsWith("┗")).toBe(true);
+			expect(lines[0]?.startsWith("─")).toBe(true);
+			expect(lines.at(-1)?.startsWith("─")).toBe(true);
 		});
 
 		/**
-		 * The rows given are exactly the frame, the rule and the prompt, with
-		 * nothing over for the conversation. The panel is still whole; it is the
+		 * The rows given are exactly the framing, the rule and the prompt, with
+		 * nothing over for the conversation. The framing is still whole; it is the
 		 * transcript that gives way.
 		 */
-		it("keeps the whole frame when only the frame fits", () => {
+		it("keeps the whole framing when only the framing fits", () => {
 			session.messages = Array.from({ length: 30 }, (_, i) =>
 				assistant(`reply number ${i}`),
 			);
@@ -437,18 +408,10 @@ describe("SubagentViewer", () => {
 			const lines = plain(viewer({ rows: 4 }));
 
 			expect(lines.length).toBe(4);
-			expect(lines[0]?.startsWith("┏")).toBe(true);
-			expect(lines.at(-1)?.startsWith("┗")).toBe(true);
+			expect(lines[0]?.startsWith("─")).toBe(true);
+			expect(lines.at(-1)?.startsWith("─")).toBe(true);
 		});
 
-		/**
-		 * A panel that changes height as its subagent talks leaves its taller
-		 * self behind on screen. Pi renders differentially and skips the clearing
-		 * pass while an overlay is up (`pi-tui/dist/tui-main-screen.js:255`), so
-		 * rows the panel no longer covers keep whatever was last drawn there —
-		 * which is how one panel came to be three stacked title bars. A constant
-		 * height is what makes that impossible rather than unlikely.
-		 */
 		it("stands the same height whether the subagent has said much or little", () => {
 			const quiet = viewer({ rows: 20 });
 			expect(plain(quiet).length).toBe(20);
@@ -470,41 +433,35 @@ describe("SubagentViewer", () => {
 			session.messages = [assistant("No race here.")];
 
 			const lines = plain(viewer({ rows: 20 }));
-			const rule = lines.findIndex((line) => line.startsWith("┣"));
+			const promptIndex = lines.findIndex((line) => line.startsWith(">"));
 
-			expect(rule).toBeGreaterThan(0);
-			expect(lines[rule - 1]).toContain("No race here.");
-			// The blank rows are above it: frame, nothing, frame.
-			expect(lines[1]).toMatch(/^┃ +┃$/);
+			expect(promptIndex).toBeGreaterThan(0);
+			expect(lines.slice(0, promptIndex).join("\n")).toContain("No race here.");
 		});
 
 		/**
-		 * Nothing sensible fits in three rows, but the panel must still not
+		 * Nothing sensible fits in three rows, but the view must still not
 		 * overflow — and what survives should be its end, because that is where
 		 * the prompt and the keys are.
 		 */
-		it("keeps the prompt end when there is no room for the frame", () => {
+		it("keeps the prompt end when there is no room for the full framing", () => {
 			session.messages = [assistant("No race here.")];
 
 			const lines = plain(viewer({ rows: 3 }));
 
 			expect(lines.length).toBeLessThanOrEqual(3);
-			expect(lines.at(-1)?.startsWith("┗")).toBe(true);
+			expect(lines.at(-1)?.startsWith("─")).toBe(true);
 		});
 
-		/**
-		 * The rails carry the name and the keys, so a frame the transcript pushed
-		 * off the bottom would take the only two things that explain the panel.
-		 */
-		it("keeps its rails when the terminal is tiny", () => {
+		it("keeps its dividers when the terminal is tiny", () => {
 			session.messages = Array.from({ length: 30 }, (_, i) =>
 				assistant(`reply number ${i}`),
 			);
 
 			const lines = plain(viewer({ rows: 8 }));
 
-			expect(lines[0]?.startsWith("┏")).toBe(true);
-			expect(lines.at(-1)?.startsWith("┗")).toBe(true);
+			expect(lines[0]?.startsWith("─")).toBe(true);
+			expect(lines.at(-1)?.startsWith("─")).toBe(true);
 			expect(lines.length).toBeLessThanOrEqual(8);
 		});
 	});

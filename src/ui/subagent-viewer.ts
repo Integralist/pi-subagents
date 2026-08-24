@@ -37,31 +37,10 @@ import {
 	TERMINAL_STATUSES,
 } from "../registry.ts";
 import { STATUS_COLOR, STATUS_MARK } from "./status.ts";
+import { formatMeta } from "./subagent-list.ts";
 import { Transcript } from "./transcript.ts";
 
-/**
- * The frame's glyphs, heavy throughout.
- *
- * Heavy rather than light on purpose: the panel sits over a conversation drawn
- * in the same colours, and a thin rule beside a transcript's own box-drawing is
- * not an edge anyone reads as one.
- */
-const FRAME = {
-	topLeft: "┏",
-	topRight: "┓",
-	bottomLeft: "┗",
-	bottomRight: "┛",
-	side: "┃",
-	rule: "━",
-	teeLeft: "┣",
-	teeRight: "┫",
-} as const;
-
-/** Cells a rail spends on corners and on the lead-in rule. */
-const RAIL_CHROME = 3;
-
-/** Cells a content row spends on its two sides and their padding. */
-const ROW_CHROME = 4;
+const RULE = "─";
 
 /** What the bottom rail offers, by whether the subagent can still be reached. */
 const LIVE_HINTS = "scroll · enter steer · ctrl+x stop · esc close";
@@ -94,11 +73,6 @@ export interface SubagentViewerOptions {
 	rows?: () => number;
 	/** Defaults to asking the TUI. */
 	requestRender?: () => void;
-}
-
-/** Pad a rendered line out to `width`, counting only what is visible. */
-function pad(line: string, width: number): string {
-	return line + " ".repeat(Math.max(0, width - visibleWidth(line)));
 }
 
 export class SubagentViewer implements Component {
@@ -183,14 +157,12 @@ export class SubagentViewer implements Component {
 	}
 
 	render(width: number): string[] {
-		const inner = Math.max(1, width - ROW_CHROME);
+		const inner = Math.max(1, width - 2);
 		const rows = Math.max(1, this.#rows());
 		const live = !TERMINAL_STATUSES.has(this.#options.record.status);
 		const foot = this.#foot(width, inner, live);
-		const body = this.#body(inner).map((line) => this.#row(line, width));
-		// Two rails and whatever the foot came to. What is left is the
-		// conversation's. `slice(-0)` returns the whole array rather than none of
-		// it, so a budget of zero is taken as the special case it is.
+		const body = this.#body(inner);
+		// Top divider, bottom divider, and whatever the foot came to.
 		const budget = Math.max(0, rows - 2 - foot.length);
 		this.#lastBudget = budget;
 
@@ -202,12 +174,8 @@ export class SubagentViewer implements Component {
 		const endIndex = Math.min(body.length, startIndex + budget);
 		const shown = budget === 0 ? [] : body.slice(startIndex, endIndex);
 
-		// Padded to the full budget, above the conversation, so the panel is the
-		// same height in every frame and what was said last sits against the
-		// prompt.
-		const filler = Array.from({ length: budget - shown.length }, () =>
-			this.#row("", width),
-		);
+		// Padded to the full budget above the conversation.
+		const filler = Array.from({ length: budget - shown.length }, () => "");
 
 		const scrollBadge =
 			this.#scrollOffset > 0 ? ` [↑${this.#scrollOffset}]` : "";
@@ -218,85 +186,51 @@ export class SubagentViewer implements Component {
 			...filler,
 			...shown,
 			...foot,
-			this.#rail(FRAME.bottomLeft, FRAME.bottomRight, bottomLabel, width),
+			this.#divider(bottomLabel, width),
 		];
 
-		// Never taller than the rows given. Pi slices an overlay that overruns
-		// its height from the bottom (`pi-tui/dist/tui.js:819`), and the bottom
-		// of this panel is the prompt and the keys — so overrunning loses
-		// precisely the parts that are worth keeping. Only reachable on a
-		// terminal too short for the frame itself, where the end is what is worth
-		// keeping for the same reason.
 		return lines.length <= rows ? lines : lines.slice(-rows);
 	}
 
 	/**
 	 * Rows this panel may draw.
-	 *
-	 * Its overlay's height, not the terminal's: the two are not the same, and
-	 * the caller that sizes the overlay is the one that knows. Falling back to
-	 * the terminal keeps a viewer built without one — a test's — working.
 	 */
 	#rows(): number {
 		return this.#options.rows?.() ?? this.#options.tui.terminal.rows;
 	}
 
-	/**
-	 * A rail: two corners, a lead-in rule, whatever is inlaid, and rule to the
-	 * end of the row.
-	 *
-	 * The label is laid into the frame rather than given a row of its own,
-	 * because the panel's two most useful lines — which subagent this is, and
-	 * what the keys do — are also the two the transcript would push off screen
-	 * first if they were content.
-	 */
-	#rail(left: string, right: string, label: string, width: number): string {
+	/** A horizontal divider with optional inlaid label. */
+	#divider(label: string, width: number): string {
 		const { theme } = this.#options;
-		const room = Math.max(0, width - RAIL_CHROME - 2);
-		const inlaid = label ? ` ${truncateToWidth(label, room, "…", false)} ` : "";
-		const fill = FRAME.rule.repeat(
-			Math.max(0, width - RAIL_CHROME - visibleWidth(inlaid)),
-		);
+		if (!label) {
+			return theme.fg("borderAccent", RULE.repeat(Math.max(0, width)));
+		}
 
-		return (
-			theme.fg("borderAccent", `${left}${FRAME.rule}`) +
-			inlaid +
-			theme.fg("borderAccent", `${fill}${right}`)
+		const room = Math.max(0, width - 4);
+		const inlaid = ` ${truncateToWidth(label, room, "…", false)} `;
+		const fill = Math.max(0, width - visibleWidth(inlaid));
+		const left = Math.floor(fill / 2);
+		const right = fill - left;
+		return theme.fg(
+			"borderAccent",
+			`${RULE.repeat(left)}${inlaid}${RULE.repeat(right)}`,
 		);
 	}
 
-	/** One line of content, held between the frame's sides. */
-	#row(line: string, width: number): string {
-		const { theme } = this.#options;
-		const inner = Math.max(0, width - ROW_CHROME);
-		// Only when it would overflow: truncating unconditionally would rewrite
-		// the prompt's line, and the cursor is a marker inside it.
-		const fitted =
-			visibleWidth(line) > inner
-				? truncateToWidth(line, inner, "…", false)
-				: line;
-		const side = theme.fg("borderAccent", FRAME.side);
-		return `${side} ${pad(fitted, inner)} ${side}`;
-	}
-
 	/**
-	 * The top rail: the subagent, named the way its row in the list names it,
+	 * The top divider: the subagent, named the way its row in the list names it,
 	 * and its status.
 	 */
 	#header(width: number): string {
 		const { record, theme } = this.#options;
-		const percent =
-			record.contextPercent === null
-				? ""
-				: ` ${Math.round(record.contextPercent)}%`;
+		const meta = formatMeta(record);
+		const metaSuffix = meta ? ` (${meta})` : "";
 		const mark = theme.fg(
 			STATUS_COLOR[record.status],
 			STATUS_MARK[record.status],
 		);
-		return this.#rail(
-			FRAME.topLeft,
-			FRAME.topRight,
-			`${mark} ${record.handle} — ${record.description}${percent}`,
+		return this.#divider(
+			`${mark} ${record.handle} — ${record.description}${metaSuffix}`,
 			width,
 		);
 	}
@@ -311,40 +245,31 @@ export class SubagentViewer implements Component {
 		const { record, theme } = this.#options;
 		const { session } = record;
 		if (!session) {
-			return [theme.fg("muted", " Waiting for a free slot.")];
+			return [theme.fg("muted", "Waiting for a free slot.")];
 		}
 
 		this.#transcript.sync(session.messages, session.state.streamingMessage);
 		const lines = this.#transcript.render(width);
-		return lines.length > 0 ? lines : [theme.fg("muted", " Nothing said yet.")];
+		return lines.length > 0 ? lines : [theme.fg("muted", "Nothing said yet.")];
 	}
 
 	/**
 	 * Everything between the conversation and the bottom rail: the prompt, and
 	 * whatever the last steer or stop came back with.
-	 *
-	 * A notice sits directly above the prompt, because the answer to "did that
-	 * work" belongs next to where the message was typed. The rule above them
-	 * separates the panel's own rows from the subagent's, which otherwise run
-	 * together.
 	 */
 	#foot(width: number, inner: number, live: boolean): string[] {
 		const { theme } = this.#options;
 		const rows: string[] = [];
 
 		if (this.#notice) {
-			rows.push(this.#row(theme.fg("muted", this.#notice), width));
+			rows.push(theme.fg("muted", this.#notice));
 		}
 
 		if (live) {
-			rows.push(
-				...this.#input.render(inner).map((line) => this.#row(line, width)),
-			);
+			rows.push(...this.#input.render(inner));
 		}
 
-		return rows.length > 0
-			? [this.#rail(FRAME.teeLeft, FRAME.teeRight, "", width), ...rows]
-			: rows;
+		return rows.length > 0 ? [this.#divider("", width), ...rows] : rows;
 	}
 
 	#pageStep(): number {
