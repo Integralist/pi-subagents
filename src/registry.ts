@@ -123,6 +123,8 @@ export interface SubagentRecord {
 	model?: string;
 	/** Thinking / reasoning effort level used by this subagent. */
 	thinkingLevel?: ThinkingLevel;
+	/** Whether to trigger a main-model turn when finished, or auto-coalesce. */
+	wakeOnFinish?: boolean;
 }
 
 /**

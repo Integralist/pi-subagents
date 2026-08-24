@@ -46,6 +46,7 @@ export interface AgentConfig {
 	thinking?: ThinkingLevel;
 	color?: string;
 	maxTurns?: number;
+	wakeOnFinish?: boolean;
 	source: AgentSource;
 	/** Absent for a definition supplied at spawn time, which has no file. */
 	filePath?: string;

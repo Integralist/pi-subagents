@@ -26,7 +26,7 @@ export const DEFAULT_GRACE_TURNS = 3;
  * subagent gets a limit: an agent file written before there was a `maxTurns:`
  * to write down is exactly the one most likely to run away.
  */
-export const DEFAULT_MAX_TURNS = 30;
+export const DEFAULT_MAX_TURNS = 20;
 
 /**
  * What a subagent is told when it reaches its limit.

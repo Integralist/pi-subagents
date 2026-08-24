@@ -24,6 +24,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "./agents.ts";
 
+/** Default read-only tools assigned when no explicit allowlist is given. */
+export const DEFAULT_SUBAGENT_TOOLS = ["read", "grep", "find", "ls"] as const;
+
 /**
  * Marks everything a subagent does, so the spawn tools can refuse to run there.
  *
@@ -350,7 +353,7 @@ async function runSubagentUnguarded(
 		agentDir: getAgentDir(),
 		model: opts.model ?? ctx.model,
 		thinkingLevel: opts.thinkingLevel ?? ctx.thinkingLevel,
-		tools: config.tools,
+		tools: config.tools ?? [...DEFAULT_SUBAGENT_TOOLS],
 		resourceLoader: loader,
 		sessionManager,
 		settingsManager: SettingsManager.create(ctx.cwd, getAgentDir()),

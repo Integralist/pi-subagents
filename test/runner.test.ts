@@ -277,6 +277,20 @@ describe("runSubagent", () => {
 		expect(stub.calls[0]?.tools).toEqual(["read", "grep"]);
 	});
 
+	it("defaults tools to minimal read-only set when none is given", async () => {
+		const stub = stubFactory();
+		config.tools = undefined;
+
+		await run({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			createSession: stub.createSession,
+		});
+
+		expect(stub.calls[0]?.tools).toEqual(["read", "grep", "find", "ls"]);
+	});
+
 	it("gives the child a loader whose system prompt is the agent's own", async () => {
 		const stub = stubFactory();
 

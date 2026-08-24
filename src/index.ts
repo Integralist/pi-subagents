@@ -437,41 +437,29 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 			subagent_type: Type.Optional(
 				Type.String({
 					description:
-						"Name of the subagent to delegate to, from the list above. " +
-						"Omit it when supplying system_prompt instead: a supplied " +
-						"system_prompt is always what the subagent runs under, and a " +
-						"type named alongside one is read only as its name.",
+						"Subagent type from the available list. Omit when supplying system_prompt.",
 				}),
 			),
 			system_prompt: Type.Optional(
 				Type.String({
 					description:
-						"Instructions defining this subagent's character, used instead " +
-						"of an agent file. Supply this when no listed subagent type " +
-						"fits the work; the subagent runs under it and nothing else.",
+						"Instructions defining an inline character when no listed type fits.",
 				}),
 			),
 			name: Type.Optional(
 				Type.String({
 					description:
-						"A short one-word name for this subagent, which becomes the " +
-						"handle the user types after @ to reach it. Choose it " +
-						"yourself — a distinct one for each subagent you start — and " +
-						"never ask the user for one. Only read alongside " +
-						"system_prompt.",
+						"A short one-word name for an inline subagent (@handle). Choose it yourself — never ask the user.",
 				}),
 			),
 			tools: Type.Optional(
 				Type.Array(Type.String(), {
 					description:
-						"The tools this subagent may use, by name. Defaults to the " +
-						"session's own tools. Only read alongside system_prompt.",
+						"Tools this subagent may use. Defaults to read-only tools (read, grep, find, ls).",
 				}),
 			),
 			prompt: Type.String({
-				description:
-					"The task for the subagent. It cannot see this conversation, so " +
-					"the prompt must be self-contained.",
+				description: "Self-contained task instructions for the subagent.",
 			}),
 			description: Type.String({
 				description: "3-5 words describing the task, shown in the UI.",
@@ -479,22 +467,27 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 			model: Type.Optional(
 				Type.String({
 					description:
-						"Model for this subagent. Partial names work (e.g. 'flash'). " +
-						"Defaults to the current model.",
+						"Model name/id (e.g. 'flash'). Defaults to current model.",
 				}),
 			),
 			thinking: Type.Optional(
 				Type.String({
 					enum: [...THINKING_LEVELS],
-					description: "Effort level. Defaults to the current level.",
+					description: "Effort level. Defaults to current level.",
 				}),
 			),
 			max_turns: Type.Optional(
 				Type.Integer({
 					minimum: 1,
 					description:
-						"Turns before the subagent is told to wrap up. Defaults to " +
-						`whatever its agent file sets, or ${DEFAULT_MAX_TURNS}.`,
+						"Turns before forced wrap-up. Defaults to agent config or " +
+						`${DEFAULT_MAX_TURNS}.`,
+				}),
+			),
+			wake_on_finish: Type.Optional(
+				Type.Boolean({
+					description:
+						"Whether to trigger a main-model turn when finished. Defaults to auto (wakes on batch completion).",
 				}),
 			),
 		}),
@@ -547,6 +540,7 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 				// The caller's choice wins; the agent file's applies otherwise;
 				// naming neither inherits the parent's.
 				thinkingLevel: (params.thinking as ThinkingLevel) ?? config.thinking,
+				wakeOnFinish: params.wake_on_finish,
 				registry: deps.registry,
 				queue: deps.queue,
 				sendMessage: deps.sendMessage,
@@ -649,12 +643,8 @@ export function createResultTool(deps: {
 		name: RESULT_TOOL_NAME,
 		label: "Get Subagent Result",
 		description:
-			"Read the result of a subagent started with " +
-			`${SPAWN_TOOL_NAME}, by the id that returned. A subagent still ` +
-			"working has no result yet, so this waits for it and returns the " +
-			"answer when it arrives: call it once rather than asking again and " +
-			"again. Do not call it at all while there is other work to do — the " +
-			"answer arrives in the conversation on its own.",
+			`Read the result of a subagent started with ${SPAWN_TOOL_NAME}, ` +
+			"by the id that returned. Waits if still working. Call once per id.",
 		parameters: Type.Object({
 			id: Type.String({
 				description: `The id ${SPAWN_TOOL_NAME} returned.`,
@@ -766,11 +756,7 @@ export function createListTool(deps: { registry: SubagentRegistry }) {
 	return defineTool({
 		name: LIST_TOOL_NAME,
 		label: "List Subagents",
-		description:
-			"Every subagent started in this session, with its status. Read this " +
-			`rather than calling ${RESULT_TOOL_NAME} on each id in turn when ` +
-			"several subagents were started together and their results are meant " +
-			"to be read as a set.",
+		description: "Every subagent started in this session, with its status.",
 		// No parameters: a caller that had to know an id to learn anything would
 		// be back where it started.
 		parameters: Type.Object({}),
@@ -833,21 +819,13 @@ export function createSteerTool(deps: { registry: SubagentRegistry }) {
 	return defineTool({
 		name: STEER_TOOL_NAME,
 		label: "Steer Subagent",
-		description:
-			`Redirect a running subagent, by the id ${SPAWN_TOOL_NAME} returned. ` +
-			"The message lands after the subagent's current turn and before its " +
-			"next model call, so it changes what the subagent does next rather " +
-			"than starting it over. A subagent still waiting for a slot takes the " +
-			"message into the task it starts on. A subagent that has already " +
-			"finished cannot be steered.",
+		description: `Redirect a running subagent by id. Instruction lands before its next model call.`,
 		parameters: Type.Object({
 			id: Type.String({
 				description: `The id ${SPAWN_TOOL_NAME} returned.`,
 			}),
 			message: Type.String({
-				description:
-					"The new instruction. The subagent cannot see this conversation, " +
-					"so the message must be self-contained.",
+				description: "The new self-contained instruction for the subagent.",
 			}),
 		}),
 
@@ -886,12 +864,7 @@ export function createStopTool(deps: {
 	return defineTool({
 		name: STOP_TOOL_NAME,
 		label: "Stop Subagent",
-		description:
-			`Halt a subagent, by the id ${SPAWN_TOOL_NAME} returned. Whatever it ` +
-			`had worked out is kept, and ${RESULT_TOOL_NAME} will return it, ` +
-			"marked as incomplete. A subagent that has not started yet is " +
-			"dropped before it does. Use this for work that is no longer wanted " +
-			"— a subagent that is merely slow will finish on its own.",
+		description: `Halt a subagent by id. Partial results are preserved.`,
 		parameters: Type.Object({
 			id: Type.String({
 				description: `The id ${SPAWN_TOOL_NAME} returned.`,

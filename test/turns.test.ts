@@ -324,8 +324,8 @@ describe("watchTurns", () => {
 	 * not discovering later that subagents are being cut off sooner.
 	 */
 	describe("the default limit", () => {
-		it("warns at thirty turns and stops three after that", async () => {
-			expect(DEFAULT_MAX_TURNS).toBe(30);
+		it("warns at twenty turns and stops three after that", async () => {
+			expect(DEFAULT_MAX_TURNS).toBe(20);
 
 			const stub = stubSession();
 			watchTurns(stub.session, registry, "abc123", {

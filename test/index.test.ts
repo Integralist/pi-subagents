@@ -904,6 +904,21 @@ describe("spawn_subagent model and effort overrides", () => {
 
 		expect(schema.required).not.toContain("model");
 		expect(schema.required).not.toContain("thinking");
+		expect(schema.required).not.toContain("wake_on_finish");
+	});
+
+	it("passes wake_on_finish option through to the record", async () => {
+		const { tool, registry } = harness({ hang: true });
+
+		await tool.execute(
+			"call-1",
+			{ ...VALID_ARGS, wake_on_finish: false },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(registry.get("sub-1")?.wakeOnFinish).toBe(false);
 	});
 });
 

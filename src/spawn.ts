@@ -89,6 +89,8 @@ export interface SubagentRunOptions {
 export interface StartSubagentOptions extends SubagentRunOptions {
 	/** The caller's few words about the task, shown in the list. */
 	description: string;
+	/** Whether to trigger a main-model turn when finished. Omitted auto-coalesces. */
+	wakeOnFinish?: boolean;
 	/** Seams for a deterministic test. */
 	newId?: () => string;
 	now?: () => number;
@@ -104,6 +106,8 @@ export interface ResumeSubagentOptions extends SubagentRunOptions {
 	 * one in force when it first ran.
 	 */
 	record: SubagentRecord;
+	/** Whether to trigger a main-model turn when finished. Omitted auto-coalesces. */
+	wakeOnFinish?: boolean;
 }
 
 /** Either the continuation is under way, or here is why it is not. */
@@ -118,6 +122,9 @@ export type ResumeResult =
 			startedFresh: boolean;
 	  }
 	| { ok: false; reason: string };
+
+/** Maximum characters included directly in the follow-up completion notice. */
+export const MAX_OUTPUT_CHARS = 8_000;
 
 /**
  * The notice the main model reads when a subagent finishes.
@@ -153,7 +160,17 @@ export function describeCompletion(
 	}
 
 	if (outcome.output) {
-		parts.push(outcome.output);
+		if (outcome.output.length > MAX_OUTPUT_CHARS) {
+			const truncated = outcome.output.slice(0, MAX_OUTPUT_CHARS);
+			const hint = record.sessionFile
+				? `Full transcript saved at ${record.sessionFile}.`
+				: `Call get_subagent_result with id "${record.id}".`;
+			parts.push(
+				`${truncated}\n\n[... output truncated to ${MAX_OUTPUT_CHARS} characters. ${hint} ...]`,
+			);
+		} else {
+			parts.push(outcome.output);
+		}
 	} else if (outcome.status === "completed") {
 		parts.push("It finished without saying anything.");
 	}
@@ -185,7 +202,15 @@ function announce(
 	record: SubagentRecord,
 	outcome: SubagentOutcome,
 	sendMessage: SendMessage,
+	registry?: SubagentRegistry,
+	forceTriggerTurn?: boolean,
 ): void {
+	const triggerTurn =
+		forceTriggerTurn ??
+		(record.wakeOnFinish !== undefined
+			? record.wakeOnFinish
+			: (registry?.running().length ?? 0) === 0);
+
 	sendMessage(
 		{
 			customType: COMPLETE_MESSAGE_TYPE,
@@ -200,7 +225,7 @@ function announce(
 				contextPercent: record.contextPercent,
 			} satisfies SubagentCompleteDetails,
 		},
-		{ deliverAs: "followUp", triggerTurn: true },
+		{ deliverAs: "followUp", triggerTurn },
 	);
 }
 
@@ -234,6 +259,8 @@ export async function stopFromUi(
 		record,
 		record.outcome ?? { status: "stopped", output: "" },
 		sendMessage,
+		deps.registry,
+		true,
 	);
 	return result;
 }
@@ -327,7 +354,7 @@ async function runAndAnnounce(
 		// tool result. Announcing it as well would put the same text into the
 		// conversation twice.
 		if (!awaited) {
-			announce(record, outcome, sendMessage);
+			announce(record, outcome, sendMessage, registry);
 		}
 	} catch {
 		// Nothing left to tell, and nobody to tell it to. The record already
@@ -392,6 +419,7 @@ export function startSubagent(opts: StartSubagentOptions): SubagentRecord {
 		turns: 0,
 		model,
 		thinkingLevel,
+		wakeOnFinish: opts.wakeOnFinish ?? opts.config.wakeOnFinish,
 	};
 
 	registry.add(record);
@@ -457,6 +485,8 @@ export function resumeSubagent(opts: ResumeSubagentOptions): ResumeResult {
 		// The new run's turn watcher counts from zero, so the old total would only
 		// sit here until the first turn overwrote it.
 		turns: 0,
+		wakeOnFinish:
+			opts.wakeOnFinish ?? opts.config.wakeOnFinish ?? record.wakeOnFinish,
 	});
 
 	queue.submit(record.id, () => {

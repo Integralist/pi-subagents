@@ -129,6 +129,7 @@ interface StartOptions {
 	queue?: SubagentQueue;
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
+	wakeOnFinish?: boolean;
 }
 
 function start(
@@ -148,6 +149,7 @@ function start(
 		run: run.run,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
+		wakeOnFinish: options.wakeOnFinish,
 		newId: () => options.id ?? "abc123",
 		now: () => 1_000,
 	});
@@ -553,6 +555,102 @@ describe("startSubagent completion", () => {
 			description: "review agents file",
 			contextPercent: null,
 		});
+	});
+
+	it("truncates output exceeding MAX_OUTPUT_CHARS and appends a hint", async () => {
+		start(run, send);
+
+		const hugeOutput = "A".repeat(10_000);
+		run.finish({ status: "completed", output: hugeOutput });
+		await send.delivered;
+
+		const content = delivered(send).message.content;
+		expect(content).toContain("[... output truncated to 8000 characters.");
+		expect(content.length).toBeLessThan(9_000);
+	});
+
+	it("does not truncate output within MAX_OUTPUT_CHARS", async () => {
+		start(run, send);
+
+		const normalOutput = "A".repeat(500);
+		run.finish({ status: "completed", output: normalOutput });
+		await send.delivered;
+
+		const content = delivered(send).message.content;
+		expect(content).not.toContain("truncated");
+		expect(content).toContain(normalOutput);
+	});
+
+	it("coalesces wakeups when multiple subagents run concurrently", async () => {
+		const registry = new SubagentRegistry();
+		const queue = new SubagentQueue(5);
+
+		const firstRun = stubRun();
+		const firstSend = stubSend();
+		start(firstRun, firstSend, { registry, queue, id: "sub-1" });
+
+		const secondRun = stubRun();
+		const secondSend = stubSend();
+		start(secondRun, secondSend, { registry, queue, id: "sub-2" });
+
+		// Both are running
+		expect(registry.running()).toHaveLength(2);
+
+		// First subagent finishes while second is still running
+		firstRun.finish({ status: "completed", output: "first done" });
+		await firstSend.delivered;
+
+		// First completion should have triggerTurn: false because sibling is still running
+		expect(delivered(firstSend).options.triggerTurn).toBe(false);
+
+		// Second subagent finishes (now last running)
+		secondRun.finish({ status: "completed", output: "second done" });
+		await secondSend.delivered;
+
+		// Second completion should have triggerTurn: true
+		expect(delivered(secondSend).options.triggerTurn).toBe(true);
+	});
+
+	it("honours explicit wakeOnFinish: true even when siblings are running", async () => {
+		const registry = new SubagentRegistry();
+		const queue = new SubagentQueue(5);
+
+		const firstRun = stubRun();
+		const firstSend = stubSend();
+		start(firstRun, firstSend, {
+			registry,
+			queue,
+			id: "sub-1",
+			wakeOnFinish: true,
+		});
+
+		const secondRun = stubRun();
+		const secondSend = stubSend();
+		start(secondRun, secondSend, { registry, queue, id: "sub-2" });
+
+		firstRun.finish({ status: "completed", output: "first done" });
+		await firstSend.delivered;
+
+		expect(delivered(firstSend).options.triggerTurn).toBe(true);
+	});
+
+	it("honours explicit wakeOnFinish: false even when last subagent", async () => {
+		const registry = new SubagentRegistry();
+		const queue = new SubagentQueue(5);
+
+		const firstRun = stubRun();
+		const firstSend = stubSend();
+		start(firstRun, firstSend, {
+			registry,
+			queue,
+			id: "sub-1",
+			wakeOnFinish: false,
+		});
+
+		firstRun.finish({ status: "completed", output: "first done" });
+		await firstSend.delivered;
+
+		expect(delivered(firstSend).options.triggerTurn).toBe(false);
 	});
 
 	/**
