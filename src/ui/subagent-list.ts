@@ -76,6 +76,8 @@ export interface SubagentListOptions {
 	 * stealing the cursor's arrows is the one thing here that would annoy daily.
 	 */
 	getEditorText?: () => string;
+	/** Whether the subagent viewer is open, in which case the list is hidden. */
+	isViewerOpen?: () => boolean;
 	/**
 	 * Subscribe to the terminal's key presses, returning an unsubscribe.
 	 *
@@ -244,6 +246,7 @@ export class SubagentList implements Component {
 		| ((record: SubagentRecord) => Promise<void> | void)
 		| undefined;
 	readonly #onStop: ((record: SubagentRecord) => void) | undefined;
+	readonly #isViewerOpen: (() => boolean) | undefined;
 	/** True while an opened subagent's view is on screen and holding the keys. */
 	#viewing = false;
 	readonly #teardown: Array<() => void> = [];
@@ -274,6 +277,7 @@ export class SubagentList implements Component {
 		this.#getEditorText = options.getEditorText;
 		this.#onOpen = options.onOpen;
 		this.#onStop = options.onStop;
+		this.#isViewerOpen = options.isViewerOpen;
 
 		if (options.requestRender) {
 			this.#teardown.push(this.#registry.onChange(() => this.#handleChange()));
@@ -374,6 +378,10 @@ export class SubagentList implements Component {
 	}
 
 	render(width: number): string[] {
+		if (this.#isViewerOpen?.()) {
+			return [];
+		}
+
 		const records = this.visible();
 		if (records.length === 0) {
 			return [];
@@ -401,7 +409,8 @@ export class SubagentList implements Component {
 		);
 		const height = Math.max(...cells.map((column) => column.length));
 
-		const lines: string[] = [];
+		// Top spacer provides breathing room from the editor prompt.
+		const lines: string[] = [""];
 		for (let row = 0; row < height; row++) {
 			const line = cells
 				.map((column, index) => {
@@ -413,7 +422,7 @@ export class SubagentList implements Component {
 				.join(" ".repeat(GUTTER));
 			lines.push(line.trimEnd());
 		}
-		// Spacer row between the subagent list and the status bar.
+		// Bottom spacer provides breathing room from the status bar.
 		lines.push("");
 		return lines;
 	}

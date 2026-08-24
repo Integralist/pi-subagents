@@ -1198,11 +1198,11 @@ export default function (pi: ExtensionAPI): void {
 			SUBAGENT_LIST_WIDGET,
 			// Built per mount rather than once: the theme arrives here, and a theme
 			// change remounts the widget with the new one.
-			(tui, theme) => {
-				if (viewerOpen) return undefined as never;
-				return new SubagentList({
+			(tui, theme) =>
+				new SubagentList({
 					registry,
 					theme,
+					isViewerOpen: () => viewerOpen,
 					requestRender: () => tui.requestRender(),
 					// The list never holds focus, so an input listener is the only way
 					// arrow keys reach it. It reads the prompt to decide whether an
@@ -1224,8 +1224,7 @@ export default function (pi: ExtensionAPI): void {
 							},
 						);
 					},
-				});
-			},
+				}),
 			{ placement: "belowEditor" },
 		);
 	});

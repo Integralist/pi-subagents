@@ -86,6 +86,7 @@ function list(
 		lingerMs?: number;
 		theme?: Theme;
 		editorText?: () => string;
+		isViewerOpen?: () => boolean;
 		onOpen?: (record: SubagentRecord) => Promise<void> | void;
 		onStop?: (record: SubagentRecord) => void;
 	} = {},
@@ -97,6 +98,7 @@ function list(
 		lingerMs: options.lingerMs,
 		now: () => clock,
 		getEditorText: options.editorText,
+		isViewerOpen: options.isViewerOpen,
 		onOpen: options.onOpen,
 		onStop: options.onStop,
 	});
@@ -107,6 +109,11 @@ function plain(subject: SubagentList, width = 80): string[] {
 	return subject.render(width).map(stripTerminalSequences);
 }
 
+/** Non-empty rendered subagent rows. */
+function rows(subject: SubagentList, width = 80): string[] {
+	return plain(subject, width).filter(Boolean);
+}
+
 describe("SubagentList", () => {
 	// The specification's scenario, quoted.
 	it("Shows each subagent with its context use", () => {
@@ -114,15 +121,15 @@ describe("SubagentList", () => {
 
 		const lines = plain(list());
 
-		// The list shows 3 rows below the prompt plus a trailing spacer row.
-		expect(lines).toHaveLength(4);
-		expect(lines[3]).toBe("");
-		// And each row shows its subagent's name.
-		expect(lines[0]).toContain("agent0");
-		expect(lines[1]).toContain("agent1");
-		expect(lines[2]).toContain("agent2");
+		// The list shows 3 rows below the prompt with top and bottom spacers.
+		expect(lines).toHaveLength(5);
+		expect(lines[0]).toBe("");
+		expect(lines[1]).toContain("agent0");
+		expect(lines[2]).toContain("agent1");
+		expect(lines[3]).toContain("agent2");
+		expect(lines[4]).toBe("");
 		// And each row shows its context-window use as a percentage.
-		for (const line of lines.slice(0, 3)) {
+		for (const line of lines.filter(Boolean)) {
 			expect(line).toContain("12%");
 		}
 	});
@@ -130,11 +137,18 @@ describe("SubagentList", () => {
 	it("shows what each subagent was asked to do", () => {
 		addRunning(2);
 
-		expect(plain(list())[0]).toContain("task 0");
+		expect(rows(list())[0]).toContain("task 0");
 	});
 
 	it("draws nothing at all when there are no subagents", () => {
 		expect(list().render(80)).toEqual([]);
+	});
+
+	it("hides when isViewerOpen returns true", () => {
+		addRunning(2);
+		const subject = list({ isViewerOpen: () => true });
+
+		expect(subject.render(80)).toEqual([]);
 	});
 
 	/**
@@ -145,7 +159,7 @@ describe("SubagentList", () => {
 	it("leaves the percentage blank rather than showing 0%", () => {
 		registry.add(record({ contextPercent: null }));
 
-		const line = plain(list())[0] ?? "";
+		const line = rows(list())[0] ?? "";
 
 		expect(line).toContain("reviewer");
 		expect(line).not.toContain("%");
@@ -155,19 +169,19 @@ describe("SubagentList", () => {
 	it("rounds a fractional percentage", () => {
 		registry.add(record({ contextPercent: 12.6 }));
 
-		expect(plain(list())[0]).toContain("13%");
+		expect(rows(list())[0]).toContain("13%");
 	});
 
 	it("shows the model name when present on the record", () => {
 		registry.add(record({ model: "claude-3-7-sonnet" }));
 
-		expect(plain(list())[0]).toContain("claude-3-7-sonnet");
+		expect(rows(list())[0]).toContain("claude-3-7-sonnet");
 	});
 
 	it("shows the thinking level in parentheses when present", () => {
 		registry.add(record({ thinkingLevel: "high" }));
 
-		expect(plain(list())[0]).toContain("(high)");
+		expect(rows(list())[0]).toContain("(high)");
 	});
 
 	it("shows model, effort level, and context percentage together", () => {
@@ -179,7 +193,7 @@ describe("SubagentList", () => {
 			}),
 		);
 
-		expect(plain(list())[0]).toContain("claude-3-7-sonnet (high) 25%");
+		expect(rows(list())[0]).toContain("claude-3-7-sonnet (high) 25%");
 	});
 
 	/**
@@ -255,7 +269,7 @@ describe("SubagentList", () => {
 				}),
 			);
 
-			const lines = plain(list(), 60);
+			const lines = rows(list(), 60);
 
 			expect(lines[0]?.endsWith("5%")).toBe(true);
 			expect(lines[1]?.endsWith("100%")).toBe(true);
@@ -278,7 +292,7 @@ describe("SubagentList", () => {
 			registry = new SubagentRegistry(() => clock);
 			registry.add(record({ status: status as SubagentRecord["status"] }));
 
-			expect(plain(list())[0], status).toContain(mark);
+			expect(rows(list())[0], status).toContain(mark);
 		}
 	});
 
@@ -299,14 +313,14 @@ describe("SubagentList", () => {
 			({ count, lines }) => {
 				addRunning(count);
 
-				expect(plain(list(), 200)).toHaveLength(lines + 1);
+				expect(plain(list(), 200)).toHaveLength(lines + 2);
 			},
 		);
 
 		it("puts the sixth subagent beside the first, not under the fifth", () => {
 			addRunning(6);
 
-			const lines = plain(list(), 200);
+			const lines = rows(list(), 200);
 
 			// Reading order is down the first column, so the sixth starts the
 			// second column and shares a line with the first.
@@ -318,7 +332,7 @@ describe("SubagentList", () => {
 		it("leaves the short column short rather than padding it with rows", () => {
 			addRunning(6);
 
-			const lines = plain(list(), 200);
+			const lines = rows(list(), 200);
 
 			expect(lines[1]).toContain("agent1");
 			// Nothing from the second column on the second line: it had one row.
@@ -353,7 +367,7 @@ describe("SubagentList", () => {
 		it("fills five per column by default", () => {
 			addRunning(6);
 
-			expect(plain(list(), 200)).toHaveLength(ROWS_PER_COLUMN + 1);
+			expect(plain(list(), 200)).toHaveLength(ROWS_PER_COLUMN + 2);
 		});
 	});
 
@@ -376,7 +390,7 @@ describe("SubagentList", () => {
 				record({ color: "cyan", description: "review agents file" }),
 			);
 
-			const line = list().render(80)[0] ?? "";
+			const line = list().render(80).filter(Boolean)[0] ?? "";
 
 			// The colour opens immediately before the name and closes after it.
 			expect(line).toContain("\x1b[36mreviewer\x1b[39m");
@@ -385,8 +399,8 @@ describe("SubagentList", () => {
 		it("leaves a row uncoloured when its colour is not one the terminal has", () => {
 			registry.add(record({ color: "hotpink" }));
 
-			expect(list().render(80)[0]).toContain("reviewer");
-			expect(list().render(80)[0]).not.toContain("\x1b[3");
+			expect(list().render(80).filter(Boolean)[0]).toContain("reviewer");
+			expect(list().render(80).filter(Boolean)[0]).not.toContain("\x1b[3");
 		});
 	});
 
@@ -401,7 +415,7 @@ describe("SubagentList", () => {
 
 			clock = NOW + DEFAULT_LINGER_MS - 1;
 
-			expect(plain(list())[0]).toContain("reviewer");
+			expect(rows(list())[0]).toContain("reviewer");
 		});
 
 		it("drops out once it has had its moment", () => {
@@ -428,7 +442,7 @@ describe("SubagentList", () => {
 
 			clock = NOW + DEFAULT_LINGER_MS * 100;
 
-			expect(plain(list())[0]).toContain("agent0");
+			expect(rows(list())[0]).toContain("agent0");
 		});
 
 		it("leaves the subagents still working in place", () => {
@@ -438,8 +452,8 @@ describe("SubagentList", () => {
 			clock = NOW + DEFAULT_LINGER_MS;
 			const lines = plain(list());
 
-			expect(lines).toHaveLength(2);
-			expect(lines[0]).toContain("agent1");
+			expect(lines).toHaveLength(3);
+			expect(lines[1]).toContain("agent1");
 		});
 
 		/**
@@ -466,7 +480,7 @@ describe("SubagentList", () => {
 				finishedAt: undefined,
 			});
 
-			expect(plain(list())[0]).toContain("reviewer");
+			expect(rows(list())[0]).toContain("reviewer");
 		});
 	});
 
@@ -589,7 +603,7 @@ describe("SubagentList", () => {
 			// Nothing to unsubscribe, and disposing must still be safe.
 			expect(() => subject.dispose()).not.toThrow();
 			expect(() => addRunning(1)).not.toThrow();
-			expect(plain(subject)).toHaveLength(2);
+			expect(plain(subject)).toHaveLength(3);
 		});
 
 		describe("the keyboard", () => {
@@ -1186,9 +1200,10 @@ describe("SubagentList navigation", () => {
 
 			const lines = subject.render(80);
 
-			expect(lines[1]).toContain(SELECTED_BG);
+			expect(lines[2]).toContain(SELECTED_BG);
 			expect(lines[0]).not.toContain(SELECTED_BG);
-			expect(lines[2]).not.toContain(SELECTED_BG);
+			expect(lines[1]).not.toContain(SELECTED_BG);
+			expect(lines[3]).not.toContain(SELECTED_BG);
 		});
 
 		it("marks nothing when nothing is selected", () => {
@@ -1205,8 +1220,8 @@ describe("SubagentList navigation", () => {
 
 			const lines = subject.render(80);
 
-			expect(lines[2]).toContain(SELECTED_BG);
-			expect(lines[1]).not.toContain(SELECTED_BG);
+			expect(lines[3]).toContain(SELECTED_BG);
+			expect(lines[2]).not.toContain(SELECTED_BG);
 		});
 
 		/**
@@ -1222,7 +1237,7 @@ describe("SubagentList navigation", () => {
 			const subject = list({ editorText: () => "" });
 			press(subject, "\x1b[B");
 
-			const line = subject.render(80)[0] ?? "";
+			const line = subject.render(80)[1] ?? "";
 
 			expect(subject.selectedId).toBe("abc123");
 			expect(visibleWidth(line)).toBe(80);
