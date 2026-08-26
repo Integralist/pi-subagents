@@ -86,6 +86,7 @@ function list(
 		lingerMs?: number;
 		theme?: Theme;
 		editorText?: () => string;
+		isEditorFocused?: () => boolean;
 		isViewerOpen?: () => boolean;
 		onOpen?: (record: SubagentRecord) => Promise<void> | void;
 		onStop?: (record: SubagentRecord) => void;
@@ -98,6 +99,7 @@ function list(
 		lingerMs: options.lingerMs,
 		now: () => clock,
 		getEditorText: options.editorText,
+		isEditorFocused: options.isEditorFocused,
 		isViewerOpen: options.isViewerOpen,
 		onOpen: options.onOpen,
 		onStop: options.onStop,
@@ -1000,6 +1002,30 @@ describe("SubagentList navigation", () => {
 
 			expect(subject.handleKey("\x1b[B")).toBe(false);
 			expect(subject.selectedId).toBeUndefined();
+		});
+
+		it("takes no keys when the editor is not focused (e.g. permission dialog or modal open)", () => {
+			let focused = false;
+			addRunning(3);
+			const subject = list({
+				editorText: () => "",
+				isEditorFocused: () => focused,
+			});
+
+			// Down arrow must pass through to the active dialog
+			expect(subject.handleKey("\x1b[B")).toBe(false);
+			expect(subject.selectedId).toBeUndefined();
+
+			// When focus returns to editor, keys are accepted
+			focused = true;
+			expect(subject.handleKey("\x1b[B")).toBe(true);
+			expect(subject.selectedId).toBe("sub-0");
+
+			// If focus is lost while a subagent was selected, keys must not be consumed
+			focused = false;
+			expect(subject.handleKey("\r")).toBe(false);
+			expect(subject.handleKey("\x1b[3~")).toBe(false);
+			expect(subject.handleKey("\x1b")).toBe(false);
 		});
 
 		/**

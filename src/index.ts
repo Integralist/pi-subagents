@@ -30,7 +30,7 @@ import {
 	type Theme,
 	type ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, Text } from "@earendil-works/pi-tui";
+import { type Component, Editor, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, discoverAgents } from "./agents.ts";
 import { steerSubagent, stopSubagent } from "./control.ts";
@@ -1182,27 +1182,38 @@ export default function (pi: ExtensionAPI): void {
 		const openViewer = async (record: SubagentRecord): Promise<void> => {
 			viewerOpen = true;
 			try {
-				await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-					tui.requestRender(true);
-					return new SubagentViewer({
-						record,
-						registry,
-						theme,
-						tui,
-						cwd: ctx.cwd,
-						// Read each time rather than captured, so a terminal resized
-						// while the panel is open resizes the panel with it.
-						rows: () => Math.max(8, tui.terminal.rows - 1),
-						close: () => {
-							tui.requestRender(true);
-							done();
+				await ctx.ui.custom<void>(
+					(tui, theme, _keybindings, done) => {
+						tui.requestRender(true);
+						return new SubagentViewer({
+							record,
+							registry,
+							theme,
+							tui,
+							cwd: ctx.cwd,
+							// Read each time rather than captured, so a terminal resized
+							// while the panel is open resizes the panel with it.
+							rows: () => Math.max(8, tui.terminal.rows - 1),
+							close: () => {
+								tui.requestRender(true);
+								done();
+							},
+							steer: (steering, message) =>
+								steerSubagent(steering, message, { registry }),
+							stop: (stopping) =>
+								stopFromUi(stopping, { registry, queue }, sendMessage),
+						});
+					},
+					{
+						overlay: true,
+						overlayOptions: {
+							anchor: "top-left",
+							width: "100%",
+							maxHeight: "100%",
+							margin: 0,
 						},
-						steer: (steering, message) =>
-							steerSubagent(steering, message, { registry }),
-						stop: (stopping) =>
-							stopFromUi(stopping, { registry, queue }, sendMessage),
-					});
-				});
+					},
+				);
 			} finally {
 				viewerOpen = false;
 			}
@@ -1222,6 +1233,32 @@ export default function (pi: ExtensionAPI): void {
 					// arrow keys reach it. It reads the prompt to decide whether an
 					// arrow was meant for the list or for the cursor.
 					addInputListener: (listener) => tui.addInputListener(listener),
+					isEditorFocused: () => {
+						if (tui.hasOverlay?.()) {
+							return false;
+						}
+						const getFocused = (
+							tui as { getFocusedComponent?: () => Component | null }
+						).getFocusedComponent;
+						const focused = getFocused ? getFocused.call(tui) : undefined;
+						if (!focused) {
+							return false;
+						}
+						if (focused instanceof Editor) {
+							return true;
+						}
+						if (ctx.ui.getEditorComponent?.()) {
+							const name = focused.constructor?.name ?? "";
+							return (
+								!name.includes("Selector") &&
+								!name.includes("Dialog") &&
+								!name.includes("Modal") &&
+								!name.includes("Viewer") &&
+								!name.startsWith("Extension")
+							);
+						}
+						return false;
+					},
 					getEditorText: () => ctx.ui.getEditorText(),
 					onOpen: openViewer,
 					// A stop that worked shows in the row's own status. A refusal has

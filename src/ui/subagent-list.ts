@@ -79,6 +79,13 @@ export interface SubagentListOptions {
 	/** Whether the subagent viewer is open, in which case the list is hidden. */
 	isViewerOpen?: () => boolean;
 	/**
+	 * Whether the prompt editor currently holds focus.
+	 *
+	 * When another component (such as an extension dialog, selector, input, or
+	 * custom modal/overlay) has focus, the list must take none of the keys.
+	 */
+	isEditorFocused?: () => boolean;
+	/**
 	 * Subscribe to the terminal's key presses, returning an unsubscribe.
 	 *
 	 * The list sits below the editor and never holds focus, so `handleInput` is
@@ -247,6 +254,7 @@ export class SubagentList implements Component {
 		| undefined;
 	readonly #onStop: ((record: SubagentRecord) => void) | undefined;
 	readonly #isViewerOpen: (() => boolean) | undefined;
+	readonly #isEditorFocused: (() => boolean) | undefined;
 	/** True while an opened subagent's view is on screen and holding the keys. */
 	#viewing = false;
 	readonly #teardown: Array<() => void> = [];
@@ -278,6 +286,7 @@ export class SubagentList implements Component {
 		this.#onOpen = options.onOpen;
 		this.#onStop = options.onStop;
 		this.#isViewerOpen = options.isViewerOpen;
+		this.#isEditorFocused = options.isEditorFocused;
 
 		if (options.requestRender) {
 			this.#teardown.push(this.#registry.onChange(() => this.#handleChange()));
@@ -488,7 +497,13 @@ export class SubagentList implements Component {
 		// list's input listener is consulted before the focused view, so a key
 		// taken here would act on the list instead — escape would leave the list
 		// and the view would never close.
-		if (this.#viewing) {
+		if (this.#viewing || this.#isViewerOpen?.()) {
+			return false;
+		}
+
+		// When another component (such as an extension dialog, selector, input,
+		// or custom modal/overlay) has focus, the list must take none of the keys.
+		if (this.#isEditorFocused && !this.#isEditorFocused()) {
 			return false;
 		}
 
