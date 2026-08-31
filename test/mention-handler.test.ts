@@ -5,7 +5,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agents.ts";
-import { createMentionHandler, createSpawnTool } from "../src/index.ts";
+import { createInlineSpawnTool, createMentionHandler } from "../src/index.ts";
 import { SubagentQueue } from "../src/queue.ts";
 import { type SubagentRecord, SubagentRegistry } from "../src/registry.ts";
 import type { RunSubagentOptions, SubagentOutcome } from "../src/runner.ts";
@@ -289,8 +289,8 @@ describe("the @name handler", () => {
 		 * test that starts a subagent the way a skill really does and then
 		 * reaches it the way a user really does.
 		 */
-		it("reaches a subagent the spawn tool gave its character", async () => {
-			const spawn = createSpawnTool({
+		it("reaches a subagent the inline spawn tool created", async () => {
+			const spawn = createInlineSpawnTool({
 				discover: () => agents,
 				run: run.run,
 				getKnownTools: () => ["read", "grep"],

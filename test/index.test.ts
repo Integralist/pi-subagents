@@ -11,14 +11,15 @@ import type {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agents.ts";
 import { PALETTE } from "../src/colors.ts";
-import * as indexModule from "../src/index.ts";
 import extension, {
-	buildToolDescription,
 	configuredLimit,
+	createInlineSpawnTool,
 	createListTool,
+	createNamedSpawnTool,
 	createResultTool,
-	createSpawnTool,
+	INLINE_SPAWN_TOOL_NAME,
 	LIST_TOOL_NAME,
+	NAMED_SPAWN_TOOL_NAME,
 	RESULT_TOOL_NAME,
 	type SpawnToolDeps,
 	STEER_TOOL_NAME,
@@ -128,7 +129,6 @@ function resultText(result: { content: Array<{ type: string }> }): string {
 
 interface Harness {
 	tool: ToolDefinition;
-	deps: SpawnToolDeps;
 	run: ReturnType<typeof vi.fn>;
 	discover: ReturnType<typeof vi.fn>;
 	registry: SubagentRegistry;
@@ -148,6 +148,7 @@ interface Harness {
  */
 function harness(
 	options: {
+		kind?: "named" | "inline";
 		agents?: AgentConfig[];
 		knownTools?: string[];
 		outcome?: SubagentOutcome;
@@ -196,10 +197,13 @@ function harness(
 			return `sub-${issued}`;
 		},
 	};
-	const tool = createSpawnTool(deps);
+	const namedTool = createNamedSpawnTool(deps);
+	const inlineTool = createInlineSpawnTool(deps);
+	// Tool descriptions are built during registration. Tests below count only
+	// discovery performed during execution.
+	discover.mockClear();
 	return {
-		tool,
-		deps,
+		tool: options.kind === "inline" ? inlineTool : namedTool,
 		run,
 		discover,
 		registry,
@@ -213,6 +217,10 @@ function harness(
 			settleRun(outcome);
 		},
 	};
+}
+
+function inlineHarness(options: Parameters<typeof harness>[0] = {}): Harness {
+	return harness({ ...options, kind: "inline" });
 }
 
 /** Let whatever a call started settle before asserting on it. */
@@ -229,6 +237,12 @@ const VALID_ARGS = {
 	subagent_type: "reviewer",
 	prompt: "review src/agents.ts",
 	description: "review agents file",
+};
+const INLINE_ARGS = {
+	name: "security",
+	system_prompt: "You are a security reviewer.",
+	prompt: "check the auth path",
+	description: "security review",
 };
 
 let ctx: ExtensionContext;
@@ -403,27 +417,11 @@ describe("extension registration", () => {
 });
 
 describe("separate spawn tool contracts", () => {
-	const NAMED_FACTORY = "createNamedSpawnTool";
-	const INLINE_FACTORY = "createInlineSpawnTool";
-
-	type SpawnFactory = (deps: SpawnToolDeps) => ToolDefinition;
-
-	function futureFactory(name: string): SpawnFactory {
-		const candidate = (indexModule as unknown as Record<string, unknown>)[name];
-		expect(candidate, `${name} must be exported`).toBeTypeOf("function");
-		return candidate as SpawnFactory;
-	}
-
-	function futureHarness(
-		factoryName: string,
+	function contractHarness(
+		kind: "named" | "inline",
 		options: Parameters<typeof harness>[0] = {},
 	): Harness {
-		const started = harness(options);
-		const tool = futureFactory(factoryName)(started.deps);
-		// Tool descriptions are built during registration. Contract tests count
-		// only discovery performed while an execution is being refused.
-		started.discover.mockClear();
-		return { ...started, tool };
+		return harness({ ...options, kind });
 	}
 
 	function objectSchema(tool: ToolDefinition) {
@@ -456,27 +454,16 @@ describe("separate spawn tool contracts", () => {
 		prompt: "review src/agents.ts",
 		description: "review agents file",
 	};
-	const INLINE_ARGS = {
-		name: "security",
-		system_prompt: "You are a security reviewer.",
-		prompt: "review src/agents.ts",
-		description: "security review",
-	};
-
 	it("exports distinct factories and tool names", () => {
-		const exports = indexModule as unknown as Record<string, unknown>;
-
-		expect(exports[NAMED_FACTORY]).toBeTypeOf("function");
-		expect(exports[INLINE_FACTORY]).toBeTypeOf("function");
-		expect(exports.NAMED_SPAWN_TOOL_NAME).toBe("spawn_named_subagent");
-		expect(exports.INLINE_SPAWN_TOOL_NAME).toBe("spawn_inline_subagent");
-		expect(exports.NAMED_SPAWN_TOOL_NAME).not.toBe(
-			exports.INLINE_SPAWN_TOOL_NAME,
-		);
+		expect(createNamedSpawnTool).toBeTypeOf("function");
+		expect(createInlineSpawnTool).toBeTypeOf("function");
+		expect(NAMED_SPAWN_TOOL_NAME).toBe("spawn_named_subagent");
+		expect(INLINE_SPAWN_TOOL_NAME).toBe("spawn_inline_subagent");
+		expect(NAMED_SPAWN_TOOL_NAME).not.toBe(INLINE_SPAWN_TOOL_NAME);
 	});
 
 	it("gives named spawn exactly its three required task fields", () => {
-		const { tool } = futureHarness(NAMED_FACTORY);
+		const { tool } = contractHarness("named");
 		const schema = objectSchema(tool);
 
 		expect(Object.keys(schema.properties).sort()).toEqual(
@@ -489,7 +476,7 @@ describe("separate spawn tool contracts", () => {
 	});
 
 	it("gives inline spawn only its caller-defined character fields", () => {
-		const { tool } = futureHarness(INLINE_FACTORY);
+		const { tool } = contractHarness("inline");
 		const schema = objectSchema(tool);
 
 		expect(Object.keys(schema.properties).sort()).toEqual(
@@ -522,10 +509,10 @@ describe("separate spawn tool contracts", () => {
 	});
 
 	it("refuses the historical named override tuple without side effects", async () => {
-		const { tool, discover, run, registry, queue } = futureHarness(
-			NAMED_FACTORY,
-			{ hang: true, limit: 1 },
-		);
+		const { tool, discover, run, registry, queue } = contractHarness("named", {
+			hang: true,
+			limit: 1,
+		});
 
 		const result = await tool.execute(
 			"call-1",
@@ -558,7 +545,7 @@ describe("separate spawn tool contracts", () => {
 	] as const)(
 		"refuses named spawn field %s before discovery",
 		async (field, value) => {
-			const { tool, discover, run, registry } = futureHarness(NAMED_FACTORY);
+			const { tool, discover, run, registry } = contractHarness("named");
 			const result = await tool.execute(
 				"call-1",
 				{ ...NAMED_ARGS, [field]: value },
@@ -579,7 +566,7 @@ describe("separate spawn tool contracts", () => {
 		["subagent_type", "reviewer"],
 		["unexpected", true],
 	] as const)("refuses inline spawn field %s", async (field, value) => {
-		const { tool, run, registry } = futureHarness(INLINE_FACTORY);
+		const { tool, run, registry } = contractHarness("inline");
 		const result = await tool.execute(
 			"call-1",
 			{ ...INLINE_ARGS, [field]: value },
@@ -598,7 +585,7 @@ describe("separate spawn tool contracts", () => {
 		["name", ""],
 		["system_prompt", "   "],
 	] as const)("refuses blank inline %s", async (field, value) => {
-		const { tool, run, registry } = futureHarness(INLINE_FACTORY);
+		const { tool, run, registry } = contractHarness("inline");
 		const result = await tool.execute(
 			"call-1",
 			{ ...INLINE_ARGS, [field]: value },
@@ -620,7 +607,7 @@ describe("separate spawn tool contracts", () => {
 			thinking: "high",
 			maxTurns: 17,
 		});
-		const { tool, run } = futureHarness(NAMED_FACTORY, { agents: [saved] });
+		const { tool, run } = contractHarness("named", { agents: [saved] });
 
 		await tool.execute(
 			"call-1",
@@ -641,7 +628,7 @@ describe("separate spawn tool contracts", () => {
 	});
 
 	it("refuses an unknown named type and lists the known types", async () => {
-		const { tool, run, registry } = futureHarness(NAMED_FACTORY, {
+		const { tool, run, registry } = contractHarness("named", {
 			agents: [
 				agentConfig({ name: "reviewer" }),
 				agentConfig({ name: "tester" }),
@@ -663,7 +650,7 @@ describe("separate spawn tool contracts", () => {
 	});
 
 	it("builds inline spawn only from the supplied character", async () => {
-		const { tool, run } = futureHarness(INLINE_FACTORY, {
+		const { tool, run } = contractHarness("inline", {
 			agents: [
 				agentConfig({
 					name: "reviewer",
@@ -684,7 +671,7 @@ describe("separate spawn tool contracts", () => {
 	});
 
 	it("warns when inline spawn deliberately shadows an agent file", async () => {
-		const { tool, run } = futureHarness(INLINE_FACTORY, {
+		const { tool, run } = contractHarness("inline", {
 			agents: [
 				agentConfig({
 					name: "security",
@@ -709,44 +696,7 @@ describe("separate spawn tool contracts", () => {
 	});
 });
 
-describe("buildToolDescription", () => {
-	it("names every available agent with its description", () => {
-		const description = buildToolDescription([
-			agentConfig({ name: "reviewer", description: "reviews code" }),
-			agentConfig({ name: "tester", description: "writes tests" }),
-		]);
-
-		expect(description).toContain("reviewer");
-		expect(description).toContain("reviews code");
-		expect(description).toContain("tester");
-		expect(description).toContain("writes tests");
-	});
-
-	it("says so plainly when no agents are defined", () => {
-		expect(buildToolDescription([])).toMatch(/no agent files/i);
-	});
-
-	/**
-	 * It used to say the tool "cannot be used yet" without agent files, which
-	 * stopped being true the moment a caller could supply a character of its own.
-	 */
-	it("offers the supplied-character route instead of calling itself unusable", () => {
-		const description = buildToolDescription([]);
-
-		expect(description).not.toMatch(/cannot be used/i);
-		expect(description).toContain("system_prompt");
-	});
-
-	/** The naming rule only works if the tool actually asks for a name. */
-	it("tells the caller to name each subagent itself", () => {
-		const description = buildToolDescription([agentConfig()]);
-
-		expect(description).toContain("system_prompt");
-		expect(description).toMatch(/never ask the user/i);
-	});
-});
-
-describe("spawn_subagent", () => {
+describe("spawn_named_subagent", () => {
 	// The plan's acceptance criterion for Task 3.4, quoted: spawning returns
 	// immediately with an id rather than the answer.
 	// Over a run that never finishes: if the tool waited for the subagent, this
@@ -958,16 +908,13 @@ describe("spawn_subagent", () => {
 	});
 });
 
-describe("spawn_subagent turn limit", () => {
-	it("lets the caller's turn limit win over the agent file's", async () => {
-		const { tool, run } = harness({
-			agents: [agentConfig({ maxTurns: 4 })],
-			hang: true,
-		});
+describe("spawn tool turn limits", () => {
+	it("uses the inline turn limit", async () => {
+		const { tool, run } = inlineHarness({ hang: true });
 
 		await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, max_turns: 9 },
+			{ ...INLINE_ARGS, max_turns: 9 },
 			undefined,
 			undefined,
 			ctx,
@@ -976,7 +923,7 @@ describe("spawn_subagent turn limit", () => {
 		expect(run.mock.calls[0]?.[0].config.maxTurns).toBe(9);
 	});
 
-	it("uses the agent file's limit when the caller names none", async () => {
+	it("uses the agent file's limit", async () => {
 		const { tool, run } = harness({
 			agents: [agentConfig({ maxTurns: 4 })],
 			hang: true,
@@ -1001,8 +948,8 @@ describe("spawn_subagent turn limit", () => {
 		expect(run.mock.calls[0]?.[0].config.maxTurns).toBeUndefined();
 	});
 
-	it("leaves the turn limit optional in the schema", () => {
-		const { tool } = harness();
+	it("leaves the inline turn limit optional in the schema", () => {
+		const { tool } = inlineHarness();
 		const schema = tool.parameters as {
 			required?: string[];
 			properties: Record<string, unknown>;
@@ -1013,7 +960,7 @@ describe("spawn_subagent turn limit", () => {
 	});
 });
 
-describe("spawn_subagent under a concurrency limit", () => {
+describe("spawn_named_subagent under a concurrency limit", () => {
 	it("queues a spawn when every slot is taken, and says so", async () => {
 		const { tool, run, registry } = harness({ limit: 1, hang: true });
 		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
@@ -1064,14 +1011,13 @@ describe("spawn_subagent under a concurrency limit", () => {
 	});
 });
 
-describe("spawn_subagent model and effort overrides", () => {
-	// The specification's scenario, quoted.
-	it("Honours an explicit model and effort", async () => {
-		const { tool, run } = harness();
+describe("spawn tool model and effort selection", () => {
+	it("honours an explicit inline model and effort", async () => {
+		const { tool, run } = inlineHarness();
 
 		await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, model: "flash", thinking: "low" },
+			{ ...INLINE_ARGS, model: "flash", thinking: "low" },
 			undefined,
 			undefined,
 			ctx,
@@ -1081,13 +1027,12 @@ describe("spawn_subagent model and effort overrides", () => {
 		expect(run.mock.calls[0]?.[0].thinkingLevel).toBe("low");
 	});
 
-	// The specification's scenario, quoted.
-	it("Resolves a partial model name", async () => {
-		const { tool, run } = harness();
+	it("resolves a partial inline model name", async () => {
+		const { tool, run } = inlineHarness();
 
 		await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, model: "flash" },
+			{ ...INLINE_ARGS, model: "flash" },
 			undefined,
 			undefined,
 			ctx,
@@ -1096,13 +1041,12 @@ describe("spawn_subagent model and effort overrides", () => {
 		expect(run.mock.calls[0]?.[0].model).toBe(GEMINI_FLASH);
 	});
 
-	// The specification's scenario, quoted.
-	it("Refuses an unknown model name", async () => {
-		const { tool, run } = harness();
+	it("refuses an unknown inline model name", async () => {
+		const { tool, run } = inlineHarness();
 
 		const result = await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, model: "nope" },
+			{ ...INLINE_ARGS, model: "nope" },
 			undefined,
 			undefined,
 			ctx,
@@ -1111,42 +1055,19 @@ describe("spawn_subagent model and effort overrides", () => {
 		expect(resultText(result)).toMatch(
 			/gemini-2\.5-flash[\s\S]*claude-opus-4-5/,
 		);
-		// And no subagent starts.
 		expect(run).not.toHaveBeenCalled();
 	});
 
-	// Ambiguity used to refuse outright. It now asks the user instead, covered
-	// by "spawn_subagent ambiguous model selection" below — including the
-	// refusal that still applies when no dialog-capable UI exists.
+	it("inherits the parent model and effort for inline defaults", async () => {
+		const { tool, run } = inlineHarness();
 
-	// The specification's scenario, quoted.
-	it("Inherits the parent model and effort by default", async () => {
-		const { tool, run } = harness();
+		await tool.execute("call-1", INLINE_ARGS, undefined, undefined, ctx);
 
-		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
-
-		// Nothing forced, so runSubagent falls back to the parent's own.
 		expect(run.mock.calls[0]?.[0].model).toBeUndefined();
 		expect(run.mock.calls[0]?.[0].thinkingLevel).toBeUndefined();
 	});
 
-	it("lets the caller's model win over the agent file's", async () => {
-		const { tool, run } = harness({
-			agents: [agentConfig({ model: "opus" })],
-		});
-
-		await tool.execute(
-			"call-1",
-			{ ...VALID_ARGS, model: "flash" },
-			undefined,
-			undefined,
-			ctx,
-		);
-
-		expect(run.mock.calls[0]?.[0].model).toBe(GEMINI_FLASH);
-	});
-
-	it("uses the agent file's model when the caller names none", async () => {
+	it("uses the agent file's model", async () => {
 		const { tool, run } = harness({
 			agents: [agentConfig({ model: "opus" })],
 		});
@@ -1156,28 +1077,12 @@ describe("spawn_subagent model and effort overrides", () => {
 		expect(run.mock.calls[0]?.[0].model).toBe(CLAUDE_OPUS);
 	});
 
-	it("lets the caller's effort win over the agent file's", async () => {
-		const { tool, run } = harness({
-			agents: [agentConfig({ thinking: "xhigh" })],
-		});
+	it("accepts `off` as an inline effort level", async () => {
+		const { tool, run } = inlineHarness();
 
 		await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, thinking: "minimal" },
-			undefined,
-			undefined,
-			ctx,
-		);
-
-		expect(run.mock.calls[0]?.[0].thinkingLevel).toBe("minimal");
-	});
-
-	it("accepts `off` as an effort level, as pi's own flag does", async () => {
-		const { tool, run } = harness();
-
-		await tool.execute(
-			"call-1",
-			{ ...VALID_ARGS, thinking: "off" },
+			{ ...INLINE_ARGS, thinking: "off" },
 			undefined,
 			undefined,
 			ctx,
@@ -1203,8 +1108,8 @@ describe("spawn_subagent model and effort overrides", () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
-	it("offers every thinking level pi defines in the schema", () => {
-		const { tool } = harness();
+	it("offers every thinking level in the inline schema", () => {
+		const { tool } = inlineHarness();
 		const schema = tool.parameters as {
 			properties: { thinking?: { enum?: string[] } };
 		};
@@ -1220,8 +1125,8 @@ describe("spawn_subagent model and effort overrides", () => {
 		]);
 	});
 
-	it("leaves model and thinking optional in the schema", () => {
-		const { tool } = harness();
+	it("leaves inline execution settings optional in the schema", () => {
+		const { tool } = inlineHarness();
 		const schema = tool.parameters as { required?: string[] };
 
 		expect(schema.required).not.toContain("model");
@@ -1229,12 +1134,12 @@ describe("spawn_subagent model and effort overrides", () => {
 		expect(schema.required).not.toContain("wake_on_finish");
 	});
 
-	it("passes wake_on_finish option through to the record", async () => {
-		const { tool, registry } = harness({ hang: true });
+	it("passes inline wake_on_finish through to the record", async () => {
+		const { tool, registry } = inlineHarness({ hang: true });
 
 		await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, wake_on_finish: false },
+			{ ...INLINE_ARGS, wake_on_finish: false },
 			undefined,
 			undefined,
 			ctx,
@@ -1249,9 +1154,9 @@ describe("spawn_subagent model and effort overrides", () => {
  * access to, so resolving against all of them would happily pick one that
  * cannot run.
  */
-describe("spawn_subagent model candidates", () => {
+describe("inline spawn model candidates", () => {
 	it("resolves against the scoped models when scoping is configured", async () => {
-		const { tool, run } = harness();
+		const { tool, run } = inlineHarness();
 		ctx = fakeContext({
 			scoped: [FLASH_37],
 			available: [FLASH_36, FLASH_37],
@@ -1260,7 +1165,7 @@ describe("spawn_subagent model candidates", () => {
 
 		await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, model: "flash" },
+			{ ...INLINE_ARGS, model: "flash" },
 			undefined,
 			undefined,
 			ctx,
@@ -1273,7 +1178,7 @@ describe("spawn_subagent model candidates", () => {
 	});
 
 	it("cannot resolve a catalogue model that scoping excludes", async () => {
-		const { tool, run } = harness();
+		const { tool, run } = inlineHarness();
 		ctx = fakeContext({
 			scoped: [FLASH_37],
 			all: [...CATALOGUE, fakeModel("nowhere", "made-up-foo-flash")],
@@ -1281,7 +1186,7 @@ describe("spawn_subagent model candidates", () => {
 
 		const result = await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, model: "made-up-foo-flash" },
+			{ ...INLINE_ARGS, model: "made-up-foo-flash" },
 			undefined,
 			undefined,
 			ctx,
@@ -1292,7 +1197,7 @@ describe("spawn_subagent model candidates", () => {
 	});
 
 	it("falls back to models with configured auth when nothing is scoped", async () => {
-		const { tool, run } = harness();
+		const { tool, run } = inlineHarness();
 		ctx = fakeContext({
 			scoped: [],
 			available: [CLAUDE_OPUS],
@@ -1301,7 +1206,7 @@ describe("spawn_subagent model candidates", () => {
 
 		await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, model: "opus" },
+			{ ...INLINE_ARGS, model: "opus" },
 			undefined,
 			undefined,
 			ctx,
@@ -1311,12 +1216,12 @@ describe("spawn_subagent model candidates", () => {
 	});
 
 	it("falls back to the whole catalogue when neither is configured", async () => {
-		const { tool, run } = harness();
+		const { tool, run } = inlineHarness();
 		ctx = fakeContext({ scoped: [], available: [], all: CATALOGUE });
 
 		await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, model: "flash" },
+			{ ...INLINE_ARGS, model: "flash" },
 			undefined,
 			undefined,
 			ctx,
@@ -1326,9 +1231,9 @@ describe("spawn_subagent model candidates", () => {
 	});
 });
 
-describe("spawn_subagent ambiguous model selection", () => {
-	it("asks the user to choose when a query matches more than one model", async () => {
-		const { tool, run } = harness();
+describe("spawn tool ambiguous model selection", () => {
+	it("asks the user to choose when an inline query is ambiguous", async () => {
+		const { tool, run } = inlineHarness();
 		ctx = fakeContext({
 			scoped: [FLASH_36, FLASH_37],
 			pick: "google-vertex/gemini-3.7-flash",
@@ -1336,7 +1241,7 @@ describe("spawn_subagent ambiguous model selection", () => {
 
 		await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, model: "flash" },
+			{ ...INLINE_ARGS, model: "flash" },
 			undefined,
 			undefined,
 			ctx,
@@ -1348,12 +1253,12 @@ describe("spawn_subagent ambiguous model selection", () => {
 			"google-vertex/gemini-3.7-flash",
 		]);
 		// The title names the subagent, so the prompt is not context-free.
-		expect(selectCalls[0]?.title).toContain("reviewer");
+		expect(selectCalls[0]?.title).toContain("security");
 		expect(run.mock.calls[0]?.[0].model).toBe(FLASH_37);
 	});
 
 	it("passes the abort signal so the dialog dies with the turn", async () => {
-		const { tool } = harness();
+		const { tool } = inlineHarness();
 		ctx = fakeContext({
 			scoped: [FLASH_36, FLASH_37],
 			pick: "google-vertex/gemini-3.6-flash",
@@ -1362,7 +1267,7 @@ describe("spawn_subagent ambiguous model selection", () => {
 
 		await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, model: "flash" },
+			{ ...INLINE_ARGS, model: "flash" },
 			signal,
 			undefined,
 			ctx,
@@ -1372,12 +1277,12 @@ describe("spawn_subagent ambiguous model selection", () => {
 	});
 
 	it("inherits the parent's model when the user dismisses the dialog", async () => {
-		const { tool, run } = harness();
+		const { tool, run } = inlineHarness();
 		ctx = fakeContext({ scoped: [FLASH_36, FLASH_37], pick: undefined });
 
 		await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, model: "flash" },
+			{ ...INLINE_ARGS, model: "flash" },
 			undefined,
 			undefined,
 			ctx,
@@ -1388,12 +1293,12 @@ describe("spawn_subagent ambiguous model selection", () => {
 	});
 
 	it("says in the result that it fell back, so the choice is not silent", async () => {
-		const { tool } = harness();
+		const { tool } = inlineHarness();
 		ctx = fakeContext({ scoped: [FLASH_36, FLASH_37], pick: undefined });
 
 		const result = await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, model: "flash" },
+			{ ...INLINE_ARGS, model: "flash" },
 			undefined,
 			undefined,
 			ctx,
@@ -1403,12 +1308,12 @@ describe("spawn_subagent ambiguous model selection", () => {
 	});
 
 	it("refuses instead of asking when there is no dialog-capable UI", async () => {
-		const { tool, run } = harness();
+		const { tool, run } = inlineHarness();
 		ctx = fakeContext({ scoped: [FLASH_36, FLASH_37], hasUI: false });
 
 		const result = await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, model: "flash" },
+			{ ...INLINE_ARGS, model: "flash" },
 			undefined,
 			undefined,
 			ctx,
@@ -1421,12 +1326,12 @@ describe("spawn_subagent ambiguous model selection", () => {
 	});
 
 	it("does not ask about an unknown model, only an ambiguous one", async () => {
-		const { tool } = harness();
+		const { tool } = inlineHarness();
 		ctx = fakeContext({ scoped: [FLASH_36, FLASH_37] });
 
 		const result = await tool.execute(
 			"call-1",
-			{ ...VALID_ARGS, model: "totally-absent" },
+			{ ...INLINE_ARGS, model: "totally-absent" },
 			undefined,
 			undefined,
 			ctx,
@@ -1452,7 +1357,7 @@ describe("spawn_subagent ambiguous model selection", () => {
 	});
 });
 
-describe("spawn_subagent tool allowlist validation", () => {
+describe("spawn_named_subagent tool allowlist validation", () => {
 	it("drops a tool name pi does not know and says which", async () => {
 		// Pi accepts an unknown name into the allowlist then silently drops it at
 		// registration, so an agent asking for a misspelled tool would quietly
@@ -1501,20 +1406,12 @@ describe("spawn_subagent tool allowlist validation", () => {
 	});
 });
 
-describe("spawn_subagent with a supplied character", () => {
-	/** A persona the caller composed, rather than a type it looked up. */
-	const INLINE_ARGS = {
-		name: "security",
-		system_prompt: "You are a security reviewer.",
-		prompt: "check the auth path",
-		description: "security review",
-	};
-
+describe("spawn_inline_subagent", () => {
 	// The specification's scenario, quoted.
 	it("Runs from the supplied character", async () => {
 		// The harness offers "reviewer" and nothing else, so a run under the
 		// supplied prompt is a run no agent file took part in.
-		const { tool, run } = harness();
+		const { tool, run } = inlineHarness();
 
 		await tool.execute("call-1", INLINE_ARGS, undefined, undefined, ctx);
 
@@ -1527,7 +1424,7 @@ describe("spawn_subagent with a supplied character", () => {
 
 	// The specification's scenario, quoted.
 	it("Needs no agent file of that name", async () => {
-		const { tool, run, registry } = harness({
+		const { tool, run, registry } = inlineHarness({
 			agents: [agentConfig({ name: "reviewer" })],
 		});
 
@@ -1545,7 +1442,9 @@ describe("spawn_subagent with a supplied character", () => {
 
 	// The specification's scenario, quoted.
 	it("Limits it to the tools named", async () => {
-		const { tool, run } = harness({ knownTools: ["read", "grep", "bash"] });
+		const { tool, run } = inlineHarness({
+			knownTools: ["read", "grep", "bash"],
+		});
 
 		await tool.execute(
 			"call-1",
@@ -1560,30 +1459,16 @@ describe("spawn_subagent with a supplied character", () => {
 
 	// The specification's scenario, quoted.
 	it("Takes the supplied name as its handle", async () => {
-		const { tool, registry } = harness();
+		const { tool, registry } = inlineHarness();
 
 		await tool.execute("call-1", INLINE_ARGS, undefined, undefined, ctx);
 
 		expect(registry.get("sub-1")?.handle).toBe("security");
 	});
 
-	/**
-	 * The specification's scenario, quoted. Ugly on purpose: refusing would send
-	 * the caller back to the user for a name, which is the thing being avoided.
-	 */
-	it("Falls back to the description when no name is supplied", async () => {
-		const { tool, run, registry } = harness();
-		const { name: _unnamed, ...withoutName } = INLINE_ARGS;
-
-		await tool.execute("call-1", withoutName, undefined, undefined, ctx);
-
-		expect(run).toHaveBeenCalledOnce();
-		expect(registry.get("sub-1")?.handle).toBe("security-review");
-	});
-
 	// The specification's scenario, quoted.
 	it("Distinguishes subagents given the same name", async () => {
-		const { tool, registry } = harness({ hang: true });
+		const { tool, registry } = inlineHarness({ hang: true });
 
 		for (let n = 1; n <= 5; n++) {
 			await tool.execute(`call-${n}`, INLINE_ARGS, undefined, undefined, ctx);
@@ -1597,7 +1482,7 @@ describe("spawn_subagent with a supplied character", () => {
 
 	// The specification's scenario, quoted.
 	it("Runs the supplied character under a name an agent file already uses", async () => {
-		const { tool, run, registry } = harness({
+		const { tool, run, registry } = inlineHarness({
 			agents: [agentConfig({ name: "security" })],
 		});
 
@@ -1621,7 +1506,9 @@ describe("spawn_subagent with a supplied character", () => {
 
 	// The specification's scenario, quoted.
 	it("Says nothing about agent files when no name is shadowed", async () => {
-		const { tool } = harness({ agents: [agentConfig({ name: "reviewer" })] });
+		const { tool } = inlineHarness({
+			agents: [agentConfig({ name: "reviewer" })],
+		});
 
 		const result = await tool.execute(
 			"call-1",
@@ -1634,83 +1521,9 @@ describe("spawn_subagent with a supplied character", () => {
 		expect(resultText(result)).not.toMatch(/agent file/i);
 	});
 
-	/**
-	 * The other half of that, and the one the guard is for: a subagent started
-	 * from an agent file is named after the file it came from, so a check that
-	 * looked only at the name would tell every file-backed subagent it was
-	 * shadowing itself.
-	 */
-	it("says nothing about agent files when the subagent came from one", async () => {
-		const { tool } = harness({ agents: [agentConfig({ name: "reviewer" })] });
-
-		const result = await tool.execute(
-			"call-1",
-			VALID_ARGS,
-			undefined,
-			undefined,
-			ctx,
-		);
-
-		expect(resultText(result)).not.toMatch(/agent file/i);
-	});
-
-	// The specification's scenario, quoted.
-	it("Prefers the supplied character to the type named alongside it", async () => {
-		const { tool, run, registry } = harness({
-			agents: [agentConfig({ name: "reviewer" })],
-		});
-		const { name: _unnamed, ...withoutName } = INLINE_ARGS;
-
-		await tool.execute(
-			"call-1",
-			{ ...withoutName, subagent_type: "reviewer" },
-			undefined,
-			undefined,
-			ctx,
-		);
-
-		const config = run.mock.calls[0]?.[0].config;
-		expect(config.systemPrompt).toBe("You are a security reviewer.");
-		expect(config.source).toBe("inline");
-		// The type stands in for the name it was given instead of, so the handle
-		// is the short word rather than one slugged from the description.
-		expect(registry.get("sub-1")?.handle).toBe("reviewer");
-	});
-
-	it("takes an explicit name over the type when both are given", async () => {
-		const { tool, registry } = harness({
-			agents: [agentConfig({ name: "reviewer" })],
-		});
-
-		await tool.execute(
-			"call-1",
-			{ ...INLINE_ARGS, subagent_type: "reviewer" },
-			undefined,
-			undefined,
-			ctx,
-		);
-
-		expect(registry.get("sub-1")?.handle).toBe("security");
-	});
-
-	it("refuses a call that neither names a type nor supplies a character", async () => {
-		const { tool, run } = harness();
-
-		const result = await tool.execute(
-			"call-1",
-			{ prompt: "check the auth path", description: "security review" },
-			undefined,
-			undefined,
-			ctx,
-		);
-
-		expect(resultText(result)).toMatch(/subagent_type|system_prompt/);
-		expect(run).not.toHaveBeenCalled();
-	});
-
 	// The specification's scenario, quoted.
 	it("Gives it a colour from the palette", async () => {
-		const { tool, registry } = harness();
+		const { tool, registry } = inlineHarness();
 
 		await tool.execute("call-1", INLINE_ARGS, undefined, undefined, ctx);
 
@@ -1719,7 +1532,7 @@ describe("spawn_subagent with a supplied character", () => {
 
 	// The specification's scenario, quoted.
 	it("Refuses to start a subagent from inside a subagent", async () => {
-		const { tool, run } = harness();
+		const { tool, run } = inlineHarness();
 
 		await runInChildContext(async () => {
 			await expect(
@@ -1735,7 +1548,7 @@ describe("spawn_subagent with a supplied character", () => {
 	 * could not delegate at all; supplying a character is now how it does.
 	 */
 	it("works in a project with no agent files at all", async () => {
-		const { tool, run, registry } = harness({ agents: [] });
+		const { tool, run, registry } = inlineHarness({ agents: [] });
 
 		await tool.execute("call-1", INLINE_ARGS, undefined, undefined, ctx);
 
@@ -2164,20 +1977,20 @@ describe("compact tool results", () => {
 	});
 
 	it("draws a spawn configuration refusal as a compact line", async () => {
-		const { tool } = harness();
+		const { tool } = inlineHarness();
 		const result = await tool.execute(
 			"call-1",
-			{ prompt: "do something", description: "missing type" },
+			{ ...INLINE_ARGS, name: "" },
 			undefined,
 			undefined,
 			ctx,
 		);
 
 		expect(draw(tool, result, false)).toEqual([
-			"spawn_subagent — configuration error",
+			"spawn_inline_subagent — configuration error",
 		]);
 		expect(draw(tool, result, true).join("\n")).toContain(
-			"Refusal: Name a subagent_type from the list",
+			"Refusal: name must not be blank",
 		);
 	});
 });
