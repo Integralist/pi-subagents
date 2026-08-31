@@ -11,6 +11,7 @@ import type {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agents.ts";
 import { PALETTE } from "../src/colors.ts";
+import * as indexModule from "../src/index.ts";
 import extension, {
 	buildToolDescription,
 	configuredLimit,
@@ -19,7 +20,7 @@ import extension, {
 	createSpawnTool,
 	LIST_TOOL_NAME,
 	RESULT_TOOL_NAME,
-	SPAWN_TOOL_NAME,
+	type SpawnToolDeps,
 	STEER_TOOL_NAME,
 	STOP_TOOL_NAME,
 	SUBAGENT_LIST_WIDGET,
@@ -127,6 +128,7 @@ function resultText(result: { content: Array<{ type: string }> }): string {
 
 interface Harness {
 	tool: ToolDefinition;
+	deps: SpawnToolDeps;
 	run: ReturnType<typeof vi.fn>;
 	discover: ReturnType<typeof vi.fn>;
 	registry: SubagentRegistry;
@@ -181,7 +183,7 @@ function harness(
 	const registry = new SubagentRegistry();
 	const queue = new SubagentQueue(options.limit ?? 5);
 	let issued = 0;
-	const tool = createSpawnTool({
+	const deps: SpawnToolDeps = {
 		discover,
 		run,
 		getKnownTools: () =>
@@ -193,9 +195,11 @@ function harness(
 			issued += 1;
 			return `sub-${issued}`;
 		},
-	});
+	};
+	const tool = createSpawnTool(deps);
 	return {
 		tool,
+		deps,
 		run,
 		discover,
 		registry,
@@ -281,8 +285,11 @@ describe("extension registration", () => {
 		return { registered, renderers, handlers, startSession };
 	}
 
-	it("registers the spawn tool", () => {
-		expect(register().registered.map((t) => t.name)).toContain(SPAWN_TOOL_NAME);
+	it("registers both spawn tools", () => {
+		const names = register().registered.map((tool) => tool.name);
+
+		expect(names).toContain("spawn_named_subagent");
+		expect(names).toContain("spawn_inline_subagent");
 	});
 
 	it("registers the tool that reads a result back", () => {
@@ -303,20 +310,18 @@ describe("extension registration", () => {
 		expect(register().registered.map((t) => t.name)).toContain(LIST_TOOL_NAME);
 	});
 
-	/**
-	 * The specification's decision, quoted: five tools are registered. A sixth
-	 * would mean something was registered twice, which pi accepts silently.
-	 */
-	it("registers exactly the five tools and no more", () => {
+	/** Pi accepts duplicate registrations silently, so pin the complete set. */
+	it("registers exactly six tools", () => {
 		expect(
 			register()
-				.registered.map((t) => t.name)
+				.registered.map((tool) => tool.name)
 				.sort(),
 		).toEqual(
 			[
+				"spawn_named_subagent",
+				"spawn_inline_subagent",
 				LIST_TOOL_NAME,
 				RESULT_TOOL_NAME,
-				SPAWN_TOOL_NAME,
 				STEER_TOOL_NAME,
 				STOP_TOOL_NAME,
 			].sort(),
@@ -394,6 +399,312 @@ describe("extension registration", () => {
 		it.each(["print", "json", "rpc"])("mounts nothing in %s mode", (mode) => {
 			expect(register().startSession(mode)).toEqual([]);
 		});
+	});
+});
+
+describe("separate spawn tool contracts", () => {
+	const NAMED_FACTORY = "createNamedSpawnTool";
+	const INLINE_FACTORY = "createInlineSpawnTool";
+
+	type SpawnFactory = (deps: SpawnToolDeps) => ToolDefinition;
+
+	function futureFactory(name: string): SpawnFactory {
+		const candidate = (indexModule as unknown as Record<string, unknown>)[name];
+		expect(candidate, `${name} must be exported`).toBeTypeOf("function");
+		return candidate as SpawnFactory;
+	}
+
+	function futureHarness(
+		factoryName: string,
+		options: Parameters<typeof harness>[0] = {},
+	): Harness {
+		const started = harness(options);
+		return {
+			...started,
+			tool: futureFactory(factoryName)(started.deps),
+		};
+	}
+
+	function objectSchema(tool: ToolDefinition) {
+		return tool.parameters as {
+			properties: Record<string, { enum?: string[]; minimum?: number }>;
+			required?: string[];
+			additionalProperties?: boolean;
+		};
+	}
+
+	function expectQueueSlotAvailable(queue: SubagentQueue): void {
+		let started = false;
+		queue.submit("contract-probe", async () => {
+			started = true;
+		});
+		expect(started).toBe(true);
+		expect(queue.queuedCount).toBe(0);
+	}
+
+	function expectConfigurationRefusal(result: {
+		content: Array<{ type: string }>;
+		details?: unknown;
+	}): void {
+		expect(resultText(result)).toMatch(/^Refusal:/);
+		expect(result.details).toMatchObject({ id: "", status: "failed" });
+	}
+
+	const NAMED_ARGS = {
+		subagent_type: "reviewer",
+		prompt: "review src/agents.ts",
+		description: "review agents file",
+	};
+	const INLINE_ARGS = {
+		name: "security",
+		system_prompt: "You are a security reviewer.",
+		prompt: "review src/agents.ts",
+		description: "security review",
+	};
+
+	it("exports distinct factories and tool names", () => {
+		const exports = indexModule as unknown as Record<string, unknown>;
+
+		expect(exports[NAMED_FACTORY]).toBeTypeOf("function");
+		expect(exports[INLINE_FACTORY]).toBeTypeOf("function");
+		expect(exports.NAMED_SPAWN_TOOL_NAME).toBe("spawn_named_subagent");
+		expect(exports.INLINE_SPAWN_TOOL_NAME).toBe("spawn_inline_subagent");
+		expect(exports.NAMED_SPAWN_TOOL_NAME).not.toBe(
+			exports.INLINE_SPAWN_TOOL_NAME,
+		);
+	});
+
+	it("gives named spawn exactly its three required task fields", () => {
+		const { tool } = futureHarness(NAMED_FACTORY);
+		const schema = objectSchema(tool);
+
+		expect(Object.keys(schema.properties).sort()).toEqual(
+			["description", "prompt", "subagent_type"].sort(),
+		);
+		expect([...(schema.required ?? [])].sort()).toEqual(
+			["description", "prompt", "subagent_type"].sort(),
+		);
+		expect(schema.additionalProperties).toBe(false);
+	});
+
+	it("gives inline spawn only its caller-defined character fields", () => {
+		const { tool } = futureHarness(INLINE_FACTORY);
+		const schema = objectSchema(tool);
+
+		expect(Object.keys(schema.properties).sort()).toEqual(
+			[
+				"description",
+				"max_turns",
+				"model",
+				"name",
+				"prompt",
+				"system_prompt",
+				"thinking",
+				"tools",
+				"wake_on_finish",
+			].sort(),
+		);
+		expect([...(schema.required ?? [])].sort()).toEqual(
+			["description", "name", "prompt", "system_prompt"].sort(),
+		);
+		expect(schema.additionalProperties).toBe(false);
+		expect(schema.properties.max_turns?.minimum).toBe(1);
+		expect(schema.properties.thinking?.enum).toEqual([
+			"off",
+			"minimal",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
+	});
+
+	it("refuses the historical named override tuple without side effects", async () => {
+		const { tool, discover, run, registry, queue } = futureHarness(
+			NAMED_FACTORY,
+			{ hang: true, limit: 1 },
+		);
+
+		const result = await tool.execute(
+			"call-1",
+			{
+				...NAMED_ARGS,
+				model: "",
+				thinking: "off",
+				max_turns: 1,
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expectConfigurationRefusal(result);
+		expect(discover).not.toHaveBeenCalled();
+		expect(run).not.toHaveBeenCalled();
+		expect(registry.list()).toEqual([]);
+		expectQueueSlotAvailable(queue);
+	});
+
+	it.each([
+		["name", "other"],
+		["system_prompt", "You are someone else."],
+		["tools", ["read"]],
+		["model", "flash"],
+		["thinking", "low"],
+		["max_turns", 9],
+		["wake_on_finish", false],
+	] as const)(
+		"refuses named spawn field %s before discovery",
+		async (field, value) => {
+			const { tool, discover, run, registry } = futureHarness(NAMED_FACTORY);
+			const result = await tool.execute(
+				"call-1",
+				{ ...NAMED_ARGS, [field]: value },
+				undefined,
+				undefined,
+				ctx,
+			);
+
+			expectConfigurationRefusal(result);
+			expect(resultText(result)).toContain(field);
+			expect(discover).not.toHaveBeenCalled();
+			expect(run).not.toHaveBeenCalled();
+			expect(registry.list()).toEqual([]);
+		},
+	);
+
+	it.each([
+		["subagent_type", "reviewer"],
+		["unexpected", true],
+	] as const)("refuses inline spawn field %s", async (field, value) => {
+		const { tool, run, registry } = futureHarness(INLINE_FACTORY);
+		const result = await tool.execute(
+			"call-1",
+			{ ...INLINE_ARGS, [field]: value },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expectConfigurationRefusal(result);
+		expect(resultText(result)).toContain(field);
+		expect(run).not.toHaveBeenCalled();
+		expect(registry.list()).toEqual([]);
+	});
+
+	it.each([
+		["name", ""],
+		["system_prompt", "   "],
+	] as const)("refuses blank inline %s", async (field, value) => {
+		const { tool, run, registry } = futureHarness(INLINE_FACTORY);
+		const result = await tool.execute(
+			"call-1",
+			{ ...INLINE_ARGS, [field]: value },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expectConfigurationRefusal(result);
+		expect(resultText(result)).toContain(field);
+		expect(run).not.toHaveBeenCalled();
+		expect(registry.list()).toEqual([]);
+	});
+
+	it("resolves named spawn only from the discovered agent file", async () => {
+		const saved = agentConfig({
+			name: "saved-reviewer",
+			systemPrompt: "You are the saved reviewer.",
+			thinking: "high",
+			maxTurns: 17,
+		});
+		const { tool, run } = futureHarness(NAMED_FACTORY, { agents: [saved] });
+
+		await tool.execute(
+			"call-1",
+			{ ...NAMED_ARGS, subagent_type: "saved-reviewer" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run).toHaveBeenCalledOnce();
+		expect(run.mock.calls[0]?.[0].config).toMatchObject({
+			name: "saved-reviewer",
+			systemPrompt: "You are the saved reviewer.",
+			thinking: "high",
+			maxTurns: 17,
+			source: "project",
+		});
+	});
+
+	it("refuses an unknown named type and lists the known types", async () => {
+		const { tool, run, registry } = futureHarness(NAMED_FACTORY, {
+			agents: [
+				agentConfig({ name: "reviewer" }),
+				agentConfig({ name: "tester" }),
+			],
+		});
+
+		const result = await tool.execute(
+			"call-1",
+			{ ...NAMED_ARGS, subagent_type: "missing" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expectConfigurationRefusal(result);
+		expect(resultText(result)).toMatch(/reviewer.*tester|tester.*reviewer/s);
+		expect(run).not.toHaveBeenCalled();
+		expect(registry.list()).toEqual([]);
+	});
+
+	it("builds inline spawn only from the supplied character", async () => {
+		const { tool, run } = futureHarness(INLINE_FACTORY, {
+			agents: [
+				agentConfig({
+					name: "reviewer",
+					systemPrompt: "This saved prompt must not be used.",
+				}),
+			],
+		});
+
+		await tool.execute("call-1", INLINE_ARGS, undefined, undefined, ctx);
+
+		expect(run).toHaveBeenCalledOnce();
+		expect(run.mock.calls[0]?.[0].config).toMatchObject({
+			name: "security",
+			systemPrompt: "You are a security reviewer.",
+			source: "inline",
+		});
+		expect(run.mock.calls[0]?.[0].config.filePath).toBeUndefined();
+	});
+
+	it("warns when inline spawn deliberately shadows an agent file", async () => {
+		const { tool, run } = futureHarness(INLINE_FACTORY, {
+			agents: [
+				agentConfig({
+					name: "security",
+					systemPrompt: "This saved prompt must not be used.",
+				}),
+			],
+		});
+
+		const result = await tool.execute(
+			"call-1",
+			INLINE_ARGS,
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run).toHaveBeenCalledOnce();
+		expect(run.mock.calls[0]?.[0].config.systemPrompt).toBe(
+			"You are a security reviewer.",
+		);
+		expect(resultText(result)).toMatch(/agent file/i);
 	});
 });
 
