@@ -2,15 +2,13 @@
  * pi-subagents — delegate work to focused subagents that run as nested
  * in-process sessions.
  *
- * Registers five tools, four of which speak in the id that `spawn_subagent`
- * returns. `spawn_subagent` takes a task and either the name of an agent
- * defined under `.pi/agents/` or a character to run under, and returns that id
- * straight away — the subagent then works in the background and its answer
- * arrives in the conversation on its own. `get_subagent_result` reads that
- * answer back on demand, waiting for it when the subagent is still working, so
- * that a caller with nothing else to do asks once rather than repeatedly.
- * `steer_subagent` redirects one mid-run, and `stop_subagent` halts one while
- * keeping whatever it had worked out.
+ * Registers six tools. `spawn_named_subagent` launches an agent file exactly
+ * as configured, while `spawn_inline_subagent` launches a caller-defined
+ * character. Both return an id straight away; the subagent then works in the
+ * background and its answer arrives in the conversation on its own.
+ * `get_subagent_result` reads that answer back on demand, waiting when the
+ * subagent is still working. `steer_subagent` redirects one mid-run, and
+ * `stop_subagent` halts one while keeping whatever it had worked out.
  *
  * `list_subagents` is the exception, taking no id: it reports every subagent in
  * the session, for a caller holding several at once that needs to know which
@@ -58,7 +56,11 @@ import { DEFAULT_MAX_TURNS } from "./turns.ts";
 import { SubagentList } from "./ui/subagent-list.ts";
 import { SubagentViewer } from "./ui/subagent-viewer.ts";
 
+// Kept temporarily for tests that migrate in Slice 3; it is no longer
+// registered with pi.
 export const SPAWN_TOOL_NAME = "spawn_subagent";
+export const NAMED_SPAWN_TOOL_NAME = "spawn_named_subagent";
+export const INLINE_SPAWN_TOOL_NAME = "spawn_inline_subagent";
 export const RESULT_TOOL_NAME = "get_subagent_result";
 export const STEER_TOOL_NAME = "steer_subagent";
 export const STOP_TOOL_NAME = "stop_subagent";
@@ -218,6 +220,24 @@ async function chooseModel(
  * registration from the agents present then, so it names real agents rather
  * than describing an abstract capability.
  */
+function buildNamedToolDescription(agents: AgentConfig[]): string {
+	if (agents.length === 0) {
+		return (
+			"Launch a saved subagent exactly as configured in its agent file. " +
+			"No agent files are defined for this project."
+		);
+	}
+
+	return [
+		"Launch a saved subagent exactly as configured in its agent file. " +
+			"Available subagent types:",
+		"",
+		...agents.map(
+			(agent) => `- ${agent.name}: ${agent.description} (${agent.source})`,
+		),
+	].join("\n");
+}
+
 export function buildToolDescription(agents: AgentConfig[]): string {
 	// How to name a subagent, wherever its character comes from. Stated in both
 	// branches because the naming rule is what keeps the user out of it, and a
@@ -347,6 +367,58 @@ export function resolveSpawnConfig(
 	};
 }
 
+/** Resolve only an agent file; named spawn has no inline route. */
+function resolveNamedConfig(
+	subagentType: string,
+	agents: AgentConfig[],
+): AgentConfig {
+	const type = subagentType.trim();
+	if (!type) {
+		throw new Error("subagent_type must not be blank.");
+	}
+
+	const config = agents.find((agent) => agent.name === type);
+	if (config) {
+		return config;
+	}
+
+	throw new Error(
+		agents.length === 0
+			? "No agent files are defined for this project, so there is no " +
+					`subagent type "${type}".`
+			: `Unknown subagent type "${type}". ` +
+					`Known types: ${agents.map((agent) => agent.name).join(", ")}.`,
+	);
+}
+
+/** Build only a caller-defined character; inline spawn has no file route. */
+function resolveInlineConfig(params: {
+	name: string;
+	system_prompt: string;
+	description: string;
+	tools?: string[];
+	max_turns?: number;
+}): AgentConfig {
+	const name = params.name.trim();
+	if (!name) {
+		throw new Error("name must not be blank.");
+	}
+
+	const systemPrompt = params.system_prompt.trim();
+	if (!systemPrompt) {
+		throw new Error("system_prompt must not be blank.");
+	}
+
+	return {
+		name,
+		description: params.description,
+		systemPrompt,
+		tools: params.tools,
+		maxTurns: params.max_turns,
+		source: "inline",
+	};
+}
+
 /**
  * The agent file a supplied character is about to be named over, if there is
  * one.
@@ -424,6 +496,64 @@ function describeStart(
 	);
 
 	return parts.join("\n\n");
+}
+
+const NAMED_SPAWN_KEYS = new Set(["subagent_type", "prompt", "description"]);
+const INLINE_SPAWN_KEYS = new Set([
+	"name",
+	"system_prompt",
+	"prompt",
+	"description",
+	"tools",
+	"model",
+	"thinking",
+	"max_turns",
+	"wake_on_finish",
+]);
+
+/** Input keys a direct caller supplied outside one tool's public contract. */
+function unexpectedKeys(
+	params: Record<string, unknown>,
+	allowed: ReadonlySet<string>,
+): string[] {
+	return Object.keys(params)
+		.filter((key) => !allowed.has(key))
+		.sort();
+}
+
+/** A configuration refusal reported as a normal tool result. */
+function spawnRefusal(
+	agent: string,
+	description: string | undefined,
+	cause: unknown,
+) {
+	return {
+		content: [
+			{ type: "text" as const, text: `Refusal: ${describeCause(cause)}` },
+		],
+		details: {
+			id: "",
+			agent,
+			status: "failed",
+			description: description || "configuration error",
+			unknownTools: [],
+		} satisfies SpawnDetails,
+	};
+}
+
+/** Render a spawn result under the tool that produced it. */
+function renderSpawnResult(
+	result: { content: Array<{ type: string }>; details?: unknown },
+	options: ToolRenderResultOptions,
+	theme: Theme,
+	fallback: string,
+): Component {
+	const details = result.details as SpawnDetails | undefined;
+	const summary =
+		details?.status === "failed"
+			? `${details?.agent || fallback} — configuration error`
+			: `${details?.agent || "subagent"} (${details?.id || ""}) — ${details?.status || "started"}`;
+	return compactResult(result, options, theme, summary);
 }
 
 export function createSpawnTool(deps: SpawnToolDeps) {
@@ -613,6 +743,259 @@ export function createSpawnTool(deps: SpawnToolDeps) {
 	});
 }
 
+/** Launch an agent file without exposing character or execution overrides. */
+export function createNamedSpawnTool(deps: SpawnToolDeps) {
+	return defineTool({
+		name: NAMED_SPAWN_TOOL_NAME,
+		label: "Spawn Named Subagent",
+		description: buildNamedToolDescription(deps.discover(process.cwd())),
+		parameters: Type.Object(
+			{
+				subagent_type: Type.String({
+					description: "Saved subagent type from the available agent files.",
+				}),
+				prompt: Type.String({
+					description: "Self-contained task instructions for the subagent.",
+				}),
+				description: Type.String({
+					description: "3-5 words describing the task, shown in the UI.",
+				}),
+			},
+			{ additionalProperties: false },
+		),
+
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			if (inChildContext()) {
+				throw new Error(
+					"A subagent cannot spawn further subagents. Do the work directly.",
+				);
+			}
+
+			const extra = unexpectedKeys(
+				params as Record<string, unknown>,
+				NAMED_SPAWN_KEYS,
+			);
+			if (extra.length > 0) {
+				return spawnRefusal(
+					params.subagent_type || NAMED_SPAWN_TOOL_NAME,
+					params.description,
+					`Unexpected field(s): ${extra.join(", ")}. Allowed fields: ` +
+						"subagent_type, prompt, description.",
+				);
+			}
+
+			let config: AgentConfig;
+			try {
+				config = resolveNamedConfig(
+					params.subagent_type,
+					deps.discover(ctx.cwd),
+				);
+			} catch (error) {
+				return spawnRefusal(
+					params.subagent_type || NAMED_SPAWN_TOOL_NAME,
+					params.description,
+					error,
+				);
+			}
+
+			const { tools, unknownTools } = checkToolNames(
+				config.tools,
+				deps.getKnownTools(),
+			);
+
+			let choice: ModelChoice;
+			try {
+				choice = await chooseModel(ctx, config.name, config.model, signal);
+			} catch (error) {
+				return spawnRefusal(config.name, params.description, error);
+			}
+
+			const namedConfig: AgentConfig = {
+				...config,
+				tools,
+				wakeOnFinish: undefined,
+			};
+			const record = startSubagent({
+				ctx,
+				config: namedConfig,
+				prompt: params.prompt,
+				description: params.description,
+				model: choice.model,
+				thinkingLevel: config.thinking,
+				registry: deps.registry,
+				queue: deps.queue,
+				sendMessage: deps.sendMessage,
+				run: deps.run,
+				...(deps.newId ? { newId: deps.newId } : {}),
+			});
+
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: describeStart(record, unknownTools, choice, undefined),
+					},
+				],
+				details: {
+					id: record.id,
+					agent: config.name,
+					status: record.status,
+					description: params.description,
+					unknownTools,
+				} satisfies SpawnDetails,
+			};
+		},
+
+		renderResult: (result, options, theme) =>
+			renderSpawnResult(result, options, theme, NAMED_SPAWN_TOOL_NAME),
+	});
+}
+
+/** Launch a character defined completely by the caller. */
+export function createInlineSpawnTool(deps: SpawnToolDeps) {
+	return defineTool({
+		name: INLINE_SPAWN_TOOL_NAME,
+		label: "Spawn Inline Subagent",
+		description:
+			"Launch a caller-defined subagent. Supply its complete character and a " +
+			"short distinct name yourself; never ask the user to invent the name.",
+		parameters: Type.Object(
+			{
+				name: Type.String({
+					description:
+						"Short distinct name for the subagent. Choose it yourself; never ask the user.",
+				}),
+				system_prompt: Type.String({
+					description:
+						"Complete instructions defining the subagent's character.",
+				}),
+				prompt: Type.String({
+					description: "Self-contained task instructions for the subagent.",
+				}),
+				description: Type.String({
+					description: "3-5 words describing the task, shown in the UI.",
+				}),
+				tools: Type.Optional(
+					Type.Array(Type.String(), {
+						description:
+							"Tools this subagent may use. Defaults to read-only tools (read, grep, find, ls).",
+					}),
+				),
+				model: Type.Optional(
+					Type.String({
+						description: "Model name/id. Defaults to the current model.",
+					}),
+				),
+				thinking: Type.Optional(
+					Type.String({
+						enum: [...THINKING_LEVELS],
+						description: "Effort level. Defaults to the current level.",
+					}),
+				),
+				max_turns: Type.Optional(
+					Type.Integer({
+						minimum: 1,
+						description: `Turns before forced wrap-up. Defaults to ${DEFAULT_MAX_TURNS}.`,
+					}),
+				),
+				wake_on_finish: Type.Optional(
+					Type.Boolean({
+						description:
+							"Whether to trigger a main-model turn when finished. Defaults to automatic batch wakeup.",
+					}),
+				),
+			},
+			{ additionalProperties: false },
+		),
+
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			if (inChildContext()) {
+				throw new Error(
+					"A subagent cannot spawn further subagents. Do the work directly.",
+				);
+			}
+
+			const extra = unexpectedKeys(
+				params as Record<string, unknown>,
+				INLINE_SPAWN_KEYS,
+			);
+			if (extra.length > 0) {
+				return spawnRefusal(
+					params.name || INLINE_SPAWN_TOOL_NAME,
+					params.description,
+					`Unexpected field(s): ${extra.join(", ")}. Allowed fields: ` +
+						Array.from(INLINE_SPAWN_KEYS).join(", ") +
+						".",
+				);
+			}
+
+			let config: AgentConfig;
+			try {
+				config = resolveInlineConfig(params);
+			} catch (error) {
+				return spawnRefusal(
+					params.name || INLINE_SPAWN_TOOL_NAME,
+					params.description,
+					error,
+				);
+			}
+
+			const { tools, unknownTools } = checkToolNames(
+				config.tools,
+				deps.getKnownTools(),
+			);
+
+			let choice: ModelChoice;
+			try {
+				choice = await chooseModel(ctx, config.name, params.model, signal);
+			} catch (error) {
+				return spawnRefusal(config.name, params.description, error);
+			}
+
+			const agents = deps.discover(ctx.cwd);
+			const inlineConfig = { ...config, tools };
+			const record = startSubagent({
+				ctx,
+				config: inlineConfig,
+				prompt: params.prompt,
+				description: params.description,
+				model: choice.model,
+				thinkingLevel: params.thinking as ThinkingLevel | undefined,
+				wakeOnFinish: params.wake_on_finish,
+				registry: deps.registry,
+				queue: deps.queue,
+				sendMessage: deps.sendMessage,
+				run: deps.run,
+				...(deps.newId ? { newId: deps.newId } : {}),
+			});
+
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: describeStart(
+							record,
+							unknownTools,
+							choice,
+							shadowedFile(config, agents),
+						),
+					},
+				],
+				details: {
+					id: record.id,
+					agent: config.name,
+					status: record.status,
+					description: params.description,
+					unknownTools,
+				} satisfies SpawnDetails,
+			};
+		},
+
+		renderResult: (result, options, theme) =>
+			renderSpawnResult(result, options, theme, INLINE_SPAWN_TOOL_NAME),
+	});
+}
+
 /**
  * The record for an id the model supplied, or a refusal that says what it could
  * have asked for instead.
@@ -684,11 +1067,11 @@ export function createResultTool(deps: {
 		name: RESULT_TOOL_NAME,
 		label: "Get Subagent Result",
 		description:
-			`Read the result of a subagent started with ${SPAWN_TOOL_NAME}, ` +
-			"by the id that returned. Waits if still working. Call once per id.",
+			"Read the result of a subagent started by either spawn tool, by the " +
+			"id it returned. Waits if still working. Call once per id.",
 		parameters: Type.Object({
 			id: Type.String({
-				description: `The id ${SPAWN_TOOL_NAME} returned.`,
+				description: "The id returned by a subagent spawn tool.",
 			}),
 		}),
 
@@ -767,8 +1150,8 @@ function compactResult(
 function describeList(records: SubagentRecord[]): string {
 	if (records.length === 0) {
 		return (
-			"No subagents have been started in this session. " +
-			`Start one with ${SPAWN_TOOL_NAME}.`
+			"No subagents have been started in this session. Start one with " +
+			`${NAMED_SPAWN_TOOL_NAME} or ${INLINE_SPAWN_TOOL_NAME}.`
 		);
 	}
 
@@ -863,7 +1246,7 @@ export function createSteerTool(deps: { registry: SubagentRegistry }) {
 		description: `Redirect a running subagent by id. Instruction lands before its next model call.`,
 		parameters: Type.Object({
 			id: Type.String({
-				description: `The id ${SPAWN_TOOL_NAME} returned.`,
+				description: "The id returned by a subagent spawn tool.",
 			}),
 			message: Type.String({
 				description: "The new self-contained instruction for the subagent.",
@@ -908,7 +1291,7 @@ export function createStopTool(deps: {
 		description: `Halt a subagent by id. Partial results are preserved.`,
 		parameters: Type.Object({
 			id: Type.String({
-				description: `The id ${SPAWN_TOOL_NAME} returned.`,
+				description: "The id returned by a subagent spawn tool.",
 			}),
 		}),
 
@@ -1132,18 +1515,18 @@ export default function (pi: ExtensionAPI): void {
 	// UI, neither of which has a `pi` of its own.
 	const sendMessage: SendMessage = pi.sendMessage.bind(pi);
 
-	pi.registerTool(
-		createSpawnTool({
-			discover: discoverAgents,
-			run: runSubagent,
-			// Read lazily: other extensions register tools too, and the full set
-			// is only settled once the session is running.
-			getKnownTools: () => pi.getAllTools().map((tool) => tool.name),
-			registry,
-			queue,
-			sendMessage,
-		}),
-	);
+	const spawnDeps: SpawnToolDeps = {
+		discover: discoverAgents,
+		run: runSubagent,
+		// Read lazily: other extensions register tools too, and the full set is
+		// only settled once the session is running.
+		getKnownTools: () => pi.getAllTools().map((tool) => tool.name),
+		registry,
+		queue,
+		sendMessage,
+	};
+	pi.registerTool(createNamedSpawnTool(spawnDeps));
+	pi.registerTool(createInlineSpawnTool(spawnDeps));
 
 	pi.registerTool(createResultTool({ registry }));
 	pi.registerTool(createListTool({ registry }));

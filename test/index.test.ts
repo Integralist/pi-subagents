@@ -419,10 +419,11 @@ describe("separate spawn tool contracts", () => {
 		options: Parameters<typeof harness>[0] = {},
 	): Harness {
 		const started = harness(options);
-		return {
-			...started,
-			tool: futureFactory(factoryName)(started.deps),
-		};
+		const tool = futureFactory(factoryName)(started.deps);
+		// Tool descriptions are built during registration. Contract tests count
+		// only discovery performed while an execution is being refused.
+		started.discover.mockClear();
+		return { ...started, tool };
 	}
 
 	function objectSchema(tool: ToolDefinition) {
