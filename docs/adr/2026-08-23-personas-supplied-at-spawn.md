@@ -4,6 +4,11 @@
 - **Date**: 2026-08-23
 - **Deciders**: Integralist
 
+> [!NOTE]
+> The one-tool API in this record was superseded on 2026-08-31. The
+> historical decision remains below; the amendment after it defines
+> the current two-tool contract.
+
 ## Context
 
 A subagent's character comes from a Markdown file with YAML
@@ -84,6 +89,37 @@ naming both routes so the caller can pick one.
 > says the file was passed over.
 
 We will not ship neutral `general` or `general-readonly` agent files.
+
+### Amendment: use separate tools for separate character sources
+
+Amended 2026-08-31. Adding inline fields to `spawn_subagent` made one
+flat schema represent two mutually exclusive character sources. In
+practice, a model launching an agent file populated optional execution
+fields and changed the saved configuration. The API could execute its
+precedence rules consistently, but the model could not reliably infer
+which fields to omit.
+
+The extension now registers two spawn tools:
+
+- `spawn_named_subagent` launches an agent file exactly as configured
+  from `subagent_type`, `prompt`, and `description`.
+- `spawn_inline_subagent` requires `name`, `system_prompt`, `prompt`,
+  and `description`, with optional inline execution settings.
+
+No tool accepts both `subagent_type` and `system_prompt`. The earlier
+rule where `system_prompt` won and `subagent_type` became a fallback
+name is superseded. Inline names may still match agent-file names; the
+result reports the shadow, but the file does not configure the run.
+
+The generic `spawn_subagent` tool is removed rather than retained as a
+compatibility alias. Saved-agent execution overrides and characters
+derived by composing an agent file with a supplied prompt are not
+supported.
+
+Separate spawn tools were not considered in the original options
+below. They preserve the original goal — a supplied character needs no
+agent file — while making the character source explicit in the tool
+name and schema.
 
 ## Options Considered
 

@@ -50,12 +50,12 @@ pi install git:github.com/Integralist/pi-subagents -l   # this project only
 pi install .                                            # from a local clone
 ```
 
-| Command                      | Description                                     |
-| ---------------------------- | ----------------------------------------------- |
-| `pi list`                    | Display installed extensions and packages       |
-| `pi update <source>`         | Pull latest extension updates                   |
-| `pi remove <source>`         | Uninstall extension                             |
-| `pi install <source>@v0.1.0` | Pin a specific tag, branch, or commit           |
+| Command | Description |
+| ------- | ----------- |
+| `pi list` | Display installed extensions and packages |
+| `pi update <source>` | Pull latest extension updates |
+| `pi remove <source>` | Uninstall extension |
+| `pi install <source>@v0.1.0` | Pin a tag, branch, or commit |
 
 ### Quickstart
 
@@ -66,16 +66,18 @@ make install   # npm install
 make try       # launches pi with this extension loaded
 ```
 
-Prompt the model to delegate work, optionally specifying a model or thinking
-effort:
+Prompt the model to delegate through a saved agent file or a caller-defined
+character:
 
-- _"Use a subagent to search for tool definitions in src/"_
-- _"Have a subagent review src/queue.ts using gemini with high effort"_
-- _"Spawn a subagent running haiku with thinking off to count lines in tests"_
+- _"Use the saved explore subagent to find tool definitions in src/"_
+- _"Create a read-only performance analyst to review src/queue.ts"_
+- _"Use the saved reviewer subagent to inspect the current diff"_
 
-Model queries resolve fuzzily against configured providers (e.g. `"flash"`,
-`"haiku"`, `"gemini 3.7"`). If a loose query matches multiple configured models,
-an interactive selection dialog appears in the terminal to pick the exact one.
+A saved subagent always uses its agent file's model, thinking level, tools,
+system prompt, and turn limit. A caller-defined inline subagent may choose its
+own execution settings. Model queries resolve fuzzily against configured
+providers (for example, `"flash"`, `"haiku"`, or `"gemini 3.7"`). An ambiguous
+query opens an interactive model-selection dialog.
 
 ## Interacting with Subagents
 
@@ -99,13 +101,13 @@ Navigation keys only intercept when the prompt is empty.
 
 Pressing `enter` on a subagent opens its conversation transcript in full view:
 
-| Key                   | Action                                               |
-| --------------------- | ---------------------------------------------------- |
-| `↑` `↓` `pgup` `pgdn` | Scroll transcript history                            |
-| `home` `end`          | Jump to beginning / end of transcript                |
-| text input            | Type in composer prompt; `enter` sends steer message |
-| `ctrl+x`              | Stop subagent execution                              |
-| `escape`              | Clear composer input, or close viewer                |
+| Key | Action |
+| --- | ------ |
+| `↑` `↓` `pgup` `pgdn` | Scroll transcript history |
+| `home` `end` | Jump to beginning or end |
+| text input | Type a message; `enter` sends it |
+| `ctrl+x` | Stop subagent execution |
+| `escape` | Clear input or close the viewer |
 
 ### Direct Mentions (`@handle`)
 
@@ -113,13 +115,13 @@ Subagents receive a unique handle based on their name (e.g. `@explore`,
 `@explore-2`). Type `@handle <message>` at the main prompt to route input
 directly:
 
-| Input                         | Action                                         |
-| ----------------------------- | ---------------------------------------------- |
-| `@explore inspect auth path`  | Steers or resumes `@explore`                   |
-| `@explore`                    | Regular text (handle alone is not routed)      |
-| `ask @explore about auth`     | Regular text (only leading mentions route)     |
-| `@main @explore text`         | Routes to main model (`@main` stripped)        |
-| `@unknown hello`              | Regular text (unrecognized handle)             |
+| Input | Action |
+| ----- | ------ |
+| `@explore inspect auth path` | Steer or resume `@explore` |
+| `@explore` | Regular text; a bare handle is not routed |
+| `ask @explore about auth` | Regular text; only leading mentions route |
+| `@main @explore text` | Route to the main model after stripping `@main` |
+| `@unknown hello` | Regular text; the handle is unknown |
 
 Steering a running subagent injects the message before its next turn. Messaging
 a completed subagent resumes its session with full conversation history.
@@ -129,12 +131,13 @@ a completed subagent resumes its session with full conversation history.
 Subagents can be defined dynamically at spawn time or saved as reusable Markdown
 files.
 
-### Dynamic Spawn-Time Personas
+### Caller-Defined Inline Characters
 
-Callers and skills can describe a subagent directly in `spawn_subagent`:
+Callers and skills can define a one-off character with
+`spawn_inline_subagent`:
 
 ```txt
-spawn_subagent(
+spawn_inline_subagent(
   name: "security",
   system_prompt: "You are a Security and Abuse reviewer...",
   tools: ["read", "grep", "find", "ls"],
@@ -143,10 +146,14 @@ spawn_subagent(
 )
 ```
 
-- **Dynamic descriptions:** Skills provide character and tool boundaries
-  programmatically without creating files on disk.
-- **System prompt precedence:** A supplied `system_prompt` always governs the
-  subagent's behavior.
+`system_prompt` is the complete character definition. `prompt` is the task that
+character performs. The main model supplies the short `name`; it must not ask
+the user to invent one. An inline call does not inherit or compose with an agent
+file, even when their names match.
+
+Required inline fields are `name`, `system_prompt`, `prompt`, and `description`.
+Optional inline fields are `tools`, `model`, `thinking`, `max_turns`, and
+`wake_on_finish`.
 
 ### Reusable Agent Files
 
@@ -167,15 +174,28 @@ You are a read-only codebase explorer. Answer the prompt with specific file
 references (`path/to/file.ts:42`) and outline unexamined areas.
 ```
 
-| Field         | Required | Description                                                  |
-| ------------- | -------- | ------------------------------------------------------------ |
-| `name`        | yes      | Identifier used for delegation and `@handle` routing         |
-| `description` | yes      | Summary displayed in tool descriptions and UI list           |
-| `tools`       | no       | Allowlist of pi tool names (omitted defaults to all tools)   |
-| `model`       | no       | Model query (e.g. `haiku`). Omitted inherits parent session  |
-| `thinking`    | no       | Reasoning effort (`off`, `low`, `medium`, `high`, etc.)     |
-| `color`       | no       | Terminal color for list row (omitted selects next in palette)|
-| `maxTurns`    | no       | Maximum turns before wrap-up warning (default: 30)           |
+Launch it exactly as configured:
+
+```txt
+spawn_named_subagent(
+  subagent_type: "explore",
+  prompt: "Find the tool definitions in src/",
+  description: "Find tool definitions",
+)
+```
+
+Required frontmatter fields:
+
+- `name`: identifier used for delegation and `@handle` routing.
+- `description`: summary displayed in tool descriptions and the UI list.
+
+Optional agent-file frontmatter fields, set in the file rather than at launch:
+
+- `tools`: pi tool allowlist; omission uses the read-only defaults.
+- `model`: model query such as `haiku`; omission inherits the main model.
+- `thinking`: reasoning effort such as `off`, `low`, or `high`.
+- `color`: terminal colour; omission selects the next palette colour.
+- `maxTurns`: turns before the wrap-up warning; the default is 20.
 
 ### Discovery Tiers
 
@@ -187,6 +207,7 @@ Pi discovers agent files across two tiers (project overrides user on collision):
 ### Example Agents
 
 Nine template definitions live in `examples/`:
+
 - General workflow: `explore.md`, `reviewer.md`, `scribe.md`
 - Dimension-split code review: `behaviour.md`, `security.md`, `reliability.md`,
   `maintainability.md`, `plan-adherence.md`, `verifier.md`
@@ -199,19 +220,27 @@ make agents   # copies examples/*.md into .pi/agents/
 
 ## Tool Reference
 
-Five tools manage subagents:
+Six tools manage subagents:
 
-| Tool                  | Parameters                                     | Description                                      |
-| --------------------- | ---------------------------------------------- | ------------------------------------------------ |
-| `spawn_subagent`      | `prompt`, `description`, route options         | Launch a subagent in the background              |
-| `get_subagent_result` | `id`                                           | Retrieve outcome, waiting if currently active    |
-| `list_subagents`      | none                                           | Summary of all session subagents and statuses    |
-| `steer_subagent`      | `id`, `message`                                | Send mid-run steering message                    |
-| `stop_subagent`       | `id`                                           | Terminate subagent run                           |
+| Tool | Parameters | Purpose |
+| ---- | ---------- | ------- |
+| `spawn_named_subagent` | type and task | Launch a saved agent file |
+| `spawn_inline_subagent` | character and task | Launch an inline character |
+| `get_subagent_result` | `id` | Retrieve an outcome |
+| `list_subagents` | none | Summarize session subagents |
+| `steer_subagent` | `id`, `message` | Steer a running subagent |
+| `stop_subagent` | `id` | Stop and preserve partial results |
 
-`spawn_subagent` routes via `system_prompt` (with optional `name` and `tools`) or
-`subagent_type` (referencing an agent file). `model`, `thinking`, and
-`max_turns` can be overridden on any spawn call.
+Choose the spawn tool by character source:
+
+| Need | Tool |
+| ---- | ---- |
+| Launch a reviewed saved agent | `spawn_named_subagent` |
+| Supply a one-off character | `spawn_inline_subagent` |
+| Customize a saved character | Not supported |
+
+No tool accepts both `subagent_type` and `system_prompt`. Saved agent files
+cannot be overridden at launch.
 
 ## Workflow: Dimension-Split Code Review
 
@@ -230,7 +259,8 @@ graph TD
 ```
 
 1. **Parallel review:** The main agent writes the diff once to a temporary file
-   and spawns dimension subagents with restricted tools (`[read, grep, find, ls]`).
+   and launches saved dimension subagents whose agent files restrict their
+   tools to `read`, `grep`, `find`, and `ls`.
 2. **Concurrent execution:** Subagents run concurrently up to the configured
    limit without queueing.
 3. **Status polling:** `list_subagents` inspects overall progress across all
