@@ -36,30 +36,31 @@ it loses one.
 An extension that lets the main agent start focused subagents, and
 lets the user watch and redirect them while they work.
 
-The main agent starts a subagent with a task, optionally choosing a
-model and effort level. Subagents run in the background. A list below
-the prompt shows each running subagent, its colour, and how much of
-its context window it has used. The user moves through that list with
-the arrow keys, opens one, watches it work, and types to redirect it.
-Typing `@name` at the main prompt sends a message straight to a named
-subagent without spending a turn in the main conversation.
+The main agent starts a subagent with one of two tools. A named spawn
+launches an agent file exactly as configured. An inline spawn supplies
+a complete character and may choose its model and effort level.
+Subagents run in the background. A list below the prompt shows each
+running subagent, its colour, and how much of its context window it has
+used. The user moves through that list with the arrow keys, opens one,
+watches it work, and types to redirect it. Typing `@name` at the main
+prompt sends a message straight to a named subagent without spending a
+turn in the main conversation.
 
 A subagent that fails does not disturb the main session. It becomes a
 failed row in the list.
 
-The main agent can also supply a subagent's character as it starts
-one: a system prompt, the tools it may use, and a short name to
-address it by. The main agent chooses that name itself, so asking for
-five subagents that each attempt a feature differently produces five
-addressable subagents without the user naming any of them. Such a
-subagent is not second-class — it appears in the list, it can be
-watched and steered, and it can be reached by `@name` and continued
-after it finishes.
+For an inline spawn, the main agent supplies the complete system
+prompt, the tools it may use, and a short name. The main agent chooses
+that name itself, so asking for five subagents that each attempt a
+feature differently produces five addressable subagents without the
+user naming any of them. Such a subagent is not second-class — it
+appears in the list, it can be watched and steered, and it can be
+reached by `@name` and continued after it finishes.
 
-A character may still come from a Markdown file instead, read from
-the project, from the user's own directory, or from the set shipped
-with the extension, so that installing the extension offers
-something to delegate to before anything has been written.
+For a named spawn, the character comes from a Markdown agent file in
+the project or the user's directory. No launch field can replace its
+system prompt, tools, model, effort, or turn limit. No tool composes an
+agent file with a supplied character.
 
 The main agent can list every subagent in the session in one call, so
 it can tell what is still running without asking after each one.
@@ -82,8 +83,10 @@ it can tell what is still running without asking after each one.
    prompt, so that I can reach it without spending a main-model turn.
 1. As a developer, I want a subagent's failure contained, so that a
    crash never takes down my session.
-1. As a developer, I want to choose a subagent's model and effort, so
-   that cheap work runs on a cheap model.
+1. As a developer, I want to choose an inline subagent's model and
+   effort, so that cheap work runs on a cheap model.
+1. As a developer, I want a named subagent to use its reviewed agent
+   file unchanged, so that generated launch fields cannot alter it.
 1. As a skill author, I want to give a subagent its character when I
    start it, so that I do not have to ship an agent file for every
    persona a skill might want.
@@ -103,36 +106,55 @@ it can tell what is still running without asking after each one.
 ## Acceptance Criteria
 
 ```gherkin
-Feature: Starting a subagent
+Feature: Starting a named subagent
   As a developer
-  I want the main agent to delegate work to a focused child
-  So that my main context window stays clear
+  I want an agent file launched exactly as configured
+  So that generated launch fields cannot alter its reviewed character
+
+  Scenario: Uses every saved setting
+    Given an agent file defines a system prompt, model, effort, tools,
+      and turn limit
+    When the main agent starts that named subagent
+    Then the subagent uses every setting from the agent file
+    And its completion wake behaviour remains automatic
+
+  Scenario: Refuses execution overrides
+    When the main agent starts a named subagent with a model, effort,
+      or turn-limit field
+    Then the call fails before agent discovery
+    And no subagent starts
+
+  Scenario: Refuses an unknown subagent type
+    When the main agent starts a named subagent type that does not exist
+    Then the call fails with a message listing the known types
+    And no subagent starts
+
+Feature: Starting an inline subagent
+  As a developer
+  I want to define a one-off character at launch
+  So that every character need not be an agent file
 
   Scenario: Inherits the parent model and effort by default
     Given the main session runs a model with a medium effort level
-    When the main agent starts a subagent without naming a model
+    When the main agent starts an inline subagent without execution
+      settings
     Then the subagent runs the same model at the same effort level
 
   Scenario: Honours an explicit model and effort
     Given the main session runs a large model
-    When the main agent starts a subagent naming a small model
+    When the main agent starts an inline subagent naming a small model
       and a low effort level
     Then the subagent runs the small model at the low effort level
 
   Scenario: Resolves a partial model name
     Given a model whose full identifier contains "flash" is configured
-    When the main agent starts a subagent naming the model "flash"
+    When the main agent starts an inline subagent naming "flash"
     Then the subagent runs that configured model
 
   Scenario: Refuses an unknown model name
-    When the main agent starts a subagent naming a model that is not
-      configured
+    When the main agent starts an inline subagent naming a model that
+      is not configured
     Then the call fails with a message listing the configured models
-    And no subagent starts
-
-  Scenario: Refuses an unknown subagent type
-    When the main agent starts a subagent of a type that does not exist
-    Then the call fails with a message listing the known types
     And no subagent starts
 
 Feature: Limiting how many subagents run at once
@@ -396,7 +418,7 @@ Feature: Showing the subagent list
     Then its conversation is still shown
     And its final output is visible
 
-Feature: Starting a subagent with a supplied character
+Feature: Defining an inline character
   As a skill author
   I want to give a subagent its character when I start it
   So that every persona need not be a file written in advance
@@ -422,11 +444,10 @@ Feature: Starting a subagent with a supplied character
       and the name "security"
     Then the subagent is addressable as "security"
 
-  Scenario: Falls back to the description when no name is supplied
-    When the main agent starts a subagent supplying a system prompt
-      and a description but no name
-    Then the subagent starts
-    And it is addressable under a handle derived from its description
+  Scenario: Requires the main agent to supply a name
+    When the main agent starts an inline subagent without a name
+    Then the call fails
+    And no subagent starts
 
   Scenario: Distinguishes subagents given the same name
     When the main agent starts 5 subagents, each supplying a system
@@ -448,12 +469,9 @@ Feature: Starting a subagent with a supplied character
       a system prompt
     Then the result mentions no agent file
 
-  Scenario: Prefers the supplied character to the type named
-      alongside it
-    When the main agent starts a subagent naming a subagent type and
-      supplying a system prompt
-    Then the subagent runs under that system prompt
-    And it is addressable under the type it named
+  Scenario: Refuses an agent-file field
+    When an inline spawn includes a subagent type
+    Then the call fails before starting a subagent
 
   Scenario: Gives it a colour from the palette
     When the main agent starts a subagent supplying a system prompt
@@ -574,8 +592,8 @@ Feature: Discovering agent files
   factory. Covers starting, steering, stopping, collecting, the
   concurrency queue, turn limits, failure containment, and
   persistence. Also covers a supplied character in full — the system
-  prompt, the tool restriction, the name and its fallback, the
-  collision refusal, the recursion guard — and all of listing.
+  prompt, tool restriction, required name, shadow warning, runtime
+  key guard, and recursion guard — and all of listing.
   Chosen because it is the highest point that carries all
   agent-facing behaviour without needing a real model.
 - **Input handler** — the handler Pi calls with submitted prompt text,
@@ -615,29 +633,30 @@ have, or names a model that would refuse the spawn.
 - **A recursion guard prevents a subagent from gaining the spawn
   tools.** Nested delegation is out of scope, so a subagent's session
   is built without them.
-- **Five tools are registered**: `spawn_subagent`, `steer_subagent`,
-  `stop_subagent`, `get_subagent_result`, `list_subagents`. Names are
-  self-describing rather than borrowed, because the models in use
-  have no prior familiarity with a borrowed convention.
-- **Tool parameters follow the established shape**: `subagent_type`,
-  `prompt`, `description`, `model`, `thinking`. These are proven and
-  cost nothing to adopt.
-- **A supplied character is three more parameters on the spawn
-  tool**: a system prompt, a list of tools, and a name. All are
-  optional, and supplying the system prompt is what makes a subagent
-  run without an agent file. A character is not composed from both
-  sources: either the file supplies it or the call does, and a
-  supplied system prompt is always the one that wins. A subagent type
-  named alongside one is read as the subagent's name, never as a
-  second source of character.
-- **Naming a subagent is the main agent's job, never the user's.**
-  The spawn tool's own description directs the main agent to invent a
-  short distinct name for each subagent it starts and never to ask
-  the user for one. A name that is left out is derived from the
-  description instead; a missing name is never grounds for refusal,
-  because a refusal invites the main agent to recover by asking the
-  user, which is the outcome being avoided. Names collide harmlessly:
-  the second subagent to want a taken handle is given a numbered one.
+- **Six tools are registered**: `spawn_named_subagent`,
+  `spawn_inline_subagent`, `steer_subagent`, `stop_subagent`,
+  `get_subagent_result`, and `list_subagents`. Names remain
+  self-describing to models without prior familiarity.
+- **Named spawn has exactly three required fields**: `subagent_type`,
+  `prompt`, and `description`. Its schema exposes no character or
+  execution overrides, sets `additionalProperties: false`, and repeats
+  the key check at execution for direct callers. The agent file
+  supplies the system prompt, tools, model, effort, and turn limit.
+- **Inline spawn has one character source.** It requires `name`,
+  `system_prompt`, `prompt`, and `description`; it optionally accepts
+  `tools`, `model`, `thinking`, `max_turns`, and `wake_on_finish`. It
+  never reads an agent file as configuration.
+- **No tool composes the two character sources.** Named spawn has no
+  `system_prompt`, inline spawn has no `subagent_type`, and both refuse
+  unknown input keys before starting a subagent.
+- **Naming an inline subagent is the main agent's job, never the
+  user's.** The inline tool directs the main agent to invent a short
+  distinct name and never ask the user for one. The name is required;
+  collisions remain harmless because later handles are numbered.
+- **The generic `spawn_subagent` API is removed intentionally.** A
+  compatibility alias would retain the ambiguous flat schema and
+  provide an escape around the named tool's contract. Saved-agent
+  execution overrides are no longer supported.
 - **A name that an agent file already uses is reported, not
   refused.** The supplied character runs, under the name it was
   given, and the spawn result names the file that was passed over and
@@ -653,6 +672,10 @@ have, or names a model that would refuse the spawn.
 > protection cost the thing it was protecting. The same run showed the
 > sibling refusal costing the same way, so naming a type alongside a
 > supplied prompt is now the name rather than an error.
+> **Superseded 2026-08-31.** Separate named and inline schemas no longer
+> accept both fields. An inline name may still match an agent file; the
+> result reports the shadow without using that file as configuration.
+
 - **A subagent's record carries its own character** — prompt, tools,
   model, effort, turn limit — so that continuing one does not depend
   on a file existing. Continuation still prefers a live agent file
@@ -683,6 +706,7 @@ have, or names a model that would refuse the spawn.
 > each question re-sending the whole conversation to the provider. The
 > notice arriving on its own is still the ordinary path; waiting is
 > for the caller that has run out of other work.
+
 - **No neutral agent files are shipped.** A character supplied at
   spawn time already carries its own prompt and tools, so a
   general-purpose file to specialise through the prompt would be a
@@ -719,6 +743,7 @@ have, or names a model that would refuse the spawn.
 > extensions do not introduce standing tool choices that compete with
 > personas described dynamically at spawn time. Shipped personas moved
 > to `examples/`.
+
 - **Discovery never throws.** It runs before the main agent can offer
   any subagent at all, so one unreadable or malformed file must not
   hide every other agent beside it.

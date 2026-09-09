@@ -54,6 +54,26 @@ Tool parameter schemas will use plain types and explicit enums only,
 avoiding union and conditional constructs, because model providers
 differ in which JSON Schema features they accept.
 
+### Amendment: separate spawn contracts
+
+Amended 2026-08-31. The self-describing rule still stands, but the
+single `spawn_subagent` name and parameter decision is superseded. The
+current six tools are `spawn_named_subagent`, `spawn_inline_subagent`,
+`steer_subagent`, `stop_subagent`, `get_subagent_result`, and
+`list_subagents`.
+
+Named spawn exposes only `subagent_type`, `prompt`, and `description`.
+Inline spawn exposes a caller-defined character and its execution
+settings. Separate schemas were chosen after the flat schema caused a
+model to populate optional execution fields while launching an agent
+file. Keeping a generic compatibility alias would preserve that
+ambiguity, so `spawn_subagent` is removed intentionally.
+
+This alternative was not evaluated in the original options below. The
+original comparison considered one multiplexed lifecycle tool against
+several lifecycle tools, not two spawn tools distinguished by character
+source.
+
 ## Options Considered
 
 - **Self-describing `verb_subagent` names (chosen)** — reads

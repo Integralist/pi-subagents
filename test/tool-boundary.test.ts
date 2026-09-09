@@ -1,7 +1,7 @@
 /**
  * The tool boundary, wired end to end.
  *
- * These exercise `spawn_subagent` and `get_subagent_result` through the real
+ * These exercise both spawn tools and `get_subagent_result` through the real
  * `runSubagent`, `startSubagent` and registry, stubbing only the session
  * factory and the delivery of the completion notice. The specification names
  * this the highest seam that carries all agent-facing behaviour without needing
@@ -25,8 +25,9 @@ import type { AgentConfig } from "../src/agents.ts";
 import { STOPPED_BY_USER } from "../src/control.ts";
 import {
 	type ControlDetails,
+	createInlineSpawnTool,
+	createNamedSpawnTool,
 	createResultTool,
-	createSpawnTool,
 	createSteerTool,
 	createStopTool,
 	type SpawnDetails,
@@ -35,8 +36,14 @@ import { SubagentQueue } from "../src/queue.ts";
 import { SubagentRegistry } from "../src/registry.ts";
 import { runSubagent } from "../src/runner.ts";
 import type { SendMessage } from "../src/spawn.ts";
+import { DEFAULT_MAX_TURNS, WRAP_UP_MESSAGE } from "../src/turns.ts";
 
-const PARENT_MODEL = { id: "parent-model" };
+const PARENT_MODEL = { provider: "test", id: "parent-model" };
+const CHILD_MODEL = {
+	provider: "test",
+	id: "configured-child",
+	name: "Configured Child",
+};
 
 function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	return {
@@ -57,6 +64,11 @@ function parentContext(): ExtensionContext {
 		cwd: process.cwd(),
 		model: PARENT_MODEL,
 		thinkingLevel: "high",
+		scopedModels: [{ model: CHILD_MODEL }],
+		modelRegistry: {
+			getAvailable: () => [CHILD_MODEL],
+			getAll: () => [CHILD_MODEL],
+		},
 		// The runner reads this to nest each subagent under whoever spawned it.
 		sessionManager: { getSessionFile: () => PARENT_SESSION_FILE },
 	} as unknown as ExtensionContext;
@@ -102,6 +114,7 @@ function toolOverRealRunner(options: {
 	hangPrompt?: boolean;
 }) {
 	const factoryCalls: CreateAgentSessionOptions[] = [];
+	const sessionSubscribers: Array<(event: { type: string }) => void> = [];
 
 	// Hoisted out of the factory so a test can assert on what the child was
 	// asked to do after the tool call that asked it has returned.
@@ -125,8 +138,11 @@ function toolOverRealRunner(options: {
 					steer,
 					abort,
 					dispose: vi.fn(),
-					// Context tracking subscribes to the child the moment it exists.
-					subscribe: vi.fn(() => vi.fn()),
+					// Context and turn tracking subscribe before the first prompt.
+					subscribe: vi.fn((listener: (event: { type: string }) => void) => {
+						sessionSubscribers.push(listener);
+						return vi.fn();
+					}),
 					getContextUsage: () => ({
 						tokens: 1_000,
 						contextWindow: 200_000,
@@ -152,21 +168,25 @@ function toolOverRealRunner(options: {
 	// disposable to write. Without this the suite creates the user's real
 	// ~/.pi/agent/sessions directory and writes into it.
 	const sessionDir = mkdtempSync(join(tmpdir(), "pi-subagents-boundary-"));
-	const tool = createSpawnTool({
+	const spawnDeps = {
 		discover: () => options.agents ?? [agentConfig()],
-		run: (opts) => runSubagent({ ...opts, sessionDir, createSession }),
+		run: (opts: Parameters<typeof runSubagent>[0]) =>
+			runSubagent({ ...opts, sessionDir, createSession }),
 		getKnownTools: () => ["read", "bash", "edit", "write"],
 		registry,
 		queue,
 		sendMessage: sendMessage as unknown as SendMessage,
 		newId: () => handedOut.shift() ?? options.id ?? "sub-1",
-	});
+	};
+	const tool = createNamedSpawnTool(spawnDeps);
+	const inlineTool = createInlineSpawnTool(spawnDeps);
 	const resultTool = createResultTool({ registry });
 	const steerTool = createSteerTool({ registry });
 	const stopTool = createStopTool({ registry, queue });
 
 	return {
 		tool,
+		inlineTool,
 		resultTool,
 		steerTool,
 		stopTool,
@@ -179,6 +199,9 @@ function toolOverRealRunner(options: {
 		steer,
 		abort,
 		sessionDir,
+		emitSessionEvent: (event: { type: string }) => {
+			for (const subscriber of sessionSubscribers) subscriber(event);
+		},
 	};
 }
 
@@ -247,6 +270,101 @@ describe("Feature: Starting a subagent", () => {
 		expect(noticeText(sendMessage)).toContain("two defects found");
 		expect(registry.get("sub-1")?.status).toBe("completed");
 	});
+
+	it("uses every configured setting for a named subagent", async () => {
+		const configured = agentConfig({
+			model: "configured-child",
+			thinking: "low",
+			tools: ["read"],
+			maxTurns: 2,
+			systemPrompt: "You are the configured reviewer.",
+		});
+		const { tool, factoryCalls, registry, steer, emitSessionEvent } =
+			toolOverRealRunner({ agents: [configured], hangPrompt: true });
+
+		await tool.execute("call-1", ARGS, undefined, undefined, ctx);
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(factoryCalls[0]?.model).toBe(CHILD_MODEL);
+		expect(factoryCalls[0]?.thinkingLevel).toBe("low");
+		expect(factoryCalls[0]?.tools).toEqual(["read"]);
+		expect(factoryCalls[0]?.resourceLoader?.getSystemPrompt()).toBe(
+			"You are the configured reviewer.",
+		);
+		expect(registry.get("sub-1")?.config.maxTurns).toBe(2);
+		expect(registry.get("sub-1")?.wakeOnFinish).toBeUndefined();
+
+		emitSessionEvent({ type: "turn_end" });
+		emitSessionEvent({ type: "turn_end" });
+		expect(steer).toHaveBeenCalledWith(WRAP_UP_MESSAGE);
+	});
+
+	it("uses every supplied setting for an inline subagent", async () => {
+		const { inlineTool, factoryCalls, delivered, registry } =
+			toolOverRealRunner({});
+
+		await inlineTool.execute(
+			"call-1",
+			{
+				name: "security",
+				system_prompt: "You are an inline security reviewer.",
+				prompt: "review the auth path",
+				description: "security review",
+				model: "configured-child",
+				thinking: "low",
+				tools: ["read"],
+				max_turns: 3,
+				wake_on_finish: false,
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		await delivered;
+
+		expect(factoryCalls[0]?.model).toBe(CHILD_MODEL);
+		expect(factoryCalls[0]?.thinkingLevel).toBe("low");
+		expect(factoryCalls[0]?.tools).toEqual(["read"]);
+		expect(factoryCalls[0]?.resourceLoader?.getSystemPrompt()).toBe(
+			"You are an inline security reviewer.",
+		);
+		expect(registry.get("sub-1")?.config).toMatchObject({
+			name: "security",
+			maxTurns: 3,
+			source: "inline",
+		});
+		expect(registry.get("sub-1")?.wakeOnFinish).toBe(false);
+	});
+
+	it("uses inherited defaults when inline settings are omitted", async () => {
+		const { inlineTool, factoryCalls, registry, steer, emitSessionEvent } =
+			toolOverRealRunner({ hangPrompt: true });
+
+		await inlineTool.execute(
+			"call-1",
+			{
+				name: "security",
+				system_prompt: "You are an inline security reviewer.",
+				prompt: "review the auth path",
+				description: "security review",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(factoryCalls[0]?.model).toBe(PARENT_MODEL);
+		expect(factoryCalls[0]?.thinkingLevel).toBe("high");
+		expect(factoryCalls[0]?.tools).toEqual(["read", "grep", "find", "ls"]);
+		expect(registry.get("sub-1")?.config.maxTurns).toBeUndefined();
+		expect(registry.get("sub-1")?.wakeOnFinish).toBeUndefined();
+
+		for (let turn = 0; turn < DEFAULT_MAX_TURNS; turn++) {
+			emitSessionEvent({ type: "turn_end" });
+		}
+		expect(steer).toHaveBeenCalledWith(WRAP_UP_MESSAGE);
+	});
 });
 
 describe("Feature: Reading a subagent result back", () => {
@@ -282,7 +400,7 @@ describe("Feature: Reading a subagent result back", () => {
 			() => new Promise<never>(() => {}),
 		) as unknown as () => Promise<never>;
 		const registry = new SubagentRegistry();
-		const spawn = createSpawnTool({
+		const spawn = createNamedSpawnTool({
 			discover: () => [agentConfig()],
 			run: hanging,
 			getKnownTools: () => ["read"],

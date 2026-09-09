@@ -19,9 +19,10 @@ without consuming main-conversation tokens.
 
 TypeScript extension running on Node >= 22.19.
 
-- `src/index.ts` — Extension entry point; registers five tools (`spawn_subagent`,
-  `get_subagent_result`, `list_subagents`, `steer_subagent`, `stop_subagent`),
-  mounts the TUI status list, and sets up `@handle` mention routing.
+- `src/index.ts` — Extension entry point; registers six tools
+  (`spawn_named_subagent`, `spawn_inline_subagent`, `get_subagent_result`,
+  `list_subagents`, `steer_subagent`, `stop_subagent`), mounts the TUI status
+  list, and sets up `@handle` mention routing.
 - `src/runner.ts` — In-process subagent execution via Pi's `createAgentSession`,
   `DefaultResourceLoader` isolation, and child context recursion guards.
 - `src/spawn.ts` — Subagent lifecycle, completion notices (`deliverAs: "followUp"`

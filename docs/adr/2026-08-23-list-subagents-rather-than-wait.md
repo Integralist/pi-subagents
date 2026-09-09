@@ -88,10 +88,11 @@ have addressed that, and it was rejected.
 > well, because the model has already been given it. The wakeups that
 > remain are the ones nobody asked for, which is what a wakeup is for.
 
-This amends the [tool-naming ADR](2026-08-22-self-describing-tool-names.md),
-whose decision was four registered tools. It is now five, under the
-same self-describing `verb_subagent` shape, and the module comment
-naming four (`src/index.ts:5`) must be corrected with it.
+This amended the
+[tool-naming ADR](2026-08-22-self-describing-tool-names.md) from four
+registered tools to five at the time. A later spawn-contract amendment
+replaced one spawn tool with two, bringing the current total to six
+without changing this list-tool decision.
 
 New risk: `list_subagents` takes no arguments, so its parameter schema
 is an empty object, and providers differ in what they accept — the
