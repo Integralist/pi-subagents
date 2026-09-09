@@ -117,14 +117,15 @@ directly:
 
 | Input | Action |
 | ----- | ------ |
-| `@explore inspect auth path` | Steer or resume `@explore` |
+| `@explore inspect auth path` | Steer, resume, or auto-launch `@explore` |
 | `@explore` | Regular text; a bare handle is not routed |
 | `ask @explore about auth` | Regular text; only leading mentions route |
 | `@main @explore text` | Route to the main model after stripping `@main` |
-| `@unknown hello` | Regular text; the handle is unknown |
+| `@unknown hello` | Regular text; handle is unknown and no saved agent matches |
 
-Steering a running subagent injects the message before its next turn. Messaging
-a completed subagent resumes its session with full conversation history.
+Mentioning a running subagent injects the message before its next turn.
+Messaging a completed subagent resumes it with full conversation history.
+Mentioning a saved agent file that has not yet run starts it.
 
 ## Defining Subagents
 
@@ -224,9 +225,9 @@ Six tools manage subagents:
 
 | Tool | Parameters | Purpose |
 | ---- | ---------- | ------- |
-| `spawn_named_subagent` | type and task | Launch a saved agent file |
-| `spawn_inline_subagent` | character and task | Launch an inline character |
-| `get_subagent_result` | `id` | Retrieve an outcome |
+| `spawn_named_subagent` | `subagent_type`, `prompt`, `description` | Launch a saved agent file |
+| `spawn_inline_subagent` | `name`, `system_prompt`, `prompt`, `description` | Launch an inline character |
+| `get_subagent_result` | `id` | Wait for and retrieve an outcome (up to 10 minutes) |
 | `list_subagents` | none | Summarize session subagents |
 | `steer_subagent` | `id`, `message` | Steer a running subagent |
 | `stop_subagent` | `id` | Stop and preserve partial results |
@@ -270,8 +271,8 @@ graph TD
 
 ## Configuration
 
-Configure concurrency limits in `~/.pi/agent/settings.json` or project
-`.pi/settings.json`:
+Configure concurrency limits in `~/.pi/agent/settings.json` or project-level
+`.pi/settings.json`. Project settings override user settings; the default is 5:
 
 ```json
 {
@@ -294,6 +295,7 @@ make verify
 | `make test`       | Unit and integration suite under `vitest`         |
 | `make typecheck`  | TypeScript type checking (`tsc --noEmit`)        |
 | `make lint`       | Lint and formatting check with Biome             |
+| `make format`     | Apply formatting and safe lint fixes with Biome  |
 | `make load-check` | Extension resolution via Pi's jiti loader        |
 
 ## Licence

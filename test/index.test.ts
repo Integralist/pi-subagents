@@ -416,6 +416,33 @@ describe("extension registration", () => {
 	});
 });
 
+describe("spawn tool descriptions", () => {
+	it("says plainly when no saved agent files are available", () => {
+		const { tool } = harness({ agents: [] });
+
+		expect(tool.description).toMatch(/no agent files/i);
+	});
+
+	it("lists every saved agent available to named spawn", () => {
+		const { tool } = harness({
+			agents: [
+				agentConfig({ name: "reviewer", description: "reviews code" }),
+				agentConfig({ name: "tester", description: "writes tests" }),
+			],
+		});
+
+		expect(tool.description).toContain("reviewer: reviews code (project)");
+		expect(tool.description).toContain("tester: writes tests (project)");
+	});
+
+	it("explains how callers define an inline subagent", () => {
+		const { tool } = inlineHarness();
+
+		expect(tool.description).toMatch(/caller-defined subagent/i);
+		expect(tool.description).toMatch(/never ask the user/i);
+	});
+});
+
 describe("separate spawn tool contracts", () => {
 	function contractHarness(
 		kind: "named" | "inline",
