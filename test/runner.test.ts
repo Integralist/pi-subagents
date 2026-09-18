@@ -263,6 +263,154 @@ describe("runSubagent", () => {
 		expect(outcome.error).toMatch(/reply/i);
 	});
 
+	it("falls back to the parent model when an explicit model throws a provider error", async () => {
+		const ownModel = { id: "bedrock-claude", provider: "bedrock" } as never;
+		const calls: CreateAgentSessionOptions[] = [];
+
+		const createSession = vi.fn(
+			async (
+				opts: CreateAgentSessionOptions,
+			): Promise<CreateAgentSessionResult> => {
+				calls.push(opts);
+				const isOwn = opts.model === ownModel;
+				const session: FakeSession = {
+					messages: isOwn ? [] : [assistant("recovered answer")],
+					prompt: vi.fn(async () => {
+						if (isOwn) {
+							throw new Error(
+								"Token is expired. To refresh this SSO session run 'aws sso login'",
+							);
+						}
+					}),
+					abort: vi.fn(async () => {}),
+					dispose: vi.fn(),
+				};
+				return { session } as unknown as CreateAgentSessionResult;
+			},
+		);
+
+		const outcome = await run({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			model: ownModel,
+			createSession,
+		});
+
+		expect(calls).toHaveLength(2);
+		expect(calls[0]?.model).toBe(ownModel);
+		expect(calls[1]?.model).toBe(PARENT_MODEL);
+		expect(outcome.status).toBe("completed");
+		expect(outcome.output).toContain("Token is expired");
+		expect(outcome.output).toContain("recovered answer");
+	});
+
+	it("falls back to the parent model when an explicit model returns an error stopReason", async () => {
+		const ownModel = { id: "bedrock-claude", provider: "bedrock" } as never;
+		const calls: CreateAgentSessionOptions[] = [];
+
+		const createSession = vi.fn(
+			async (
+				opts: CreateAgentSessionOptions,
+			): Promise<CreateAgentSessionResult> => {
+				calls.push(opts);
+				const isOwn = opts.model === ownModel;
+				const session: FakeSession = {
+					messages: isOwn
+						? [assistant("partial", "error", "SSO token expired")]
+						: [assistant("recovered answer")],
+					prompt: vi.fn(async () => {}),
+					abort: vi.fn(async () => {}),
+					dispose: vi.fn(),
+				};
+				return { session } as unknown as CreateAgentSessionResult;
+			},
+		);
+
+		const outcome = await run({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			model: ownModel,
+			createSession,
+		});
+
+		expect(calls).toHaveLength(2);
+		expect(calls[0]?.model).toBe(ownModel);
+		expect(calls[1]?.model).toBe(PARENT_MODEL);
+		expect(outcome.status).toBe("completed");
+		expect(outcome.output).toContain("SSO token expired");
+		expect(outcome.output).toContain("recovered answer");
+	});
+
+	it("reports failure when both the explicit model and the parent fallback fail", async () => {
+		const ownModel = { id: "bedrock-claude", provider: "bedrock" } as never;
+
+		const createSession = vi.fn(
+			async (
+				opts: CreateAgentSessionOptions,
+			): Promise<CreateAgentSessionResult> => {
+				const isOwn = opts.model === ownModel;
+				const session: FakeSession = {
+					messages: [
+						assistant(
+							"failed",
+							"error",
+							isOwn ? "bedrock auth failed" : "parent auth failed",
+						),
+					],
+					prompt: vi.fn(async () => {}),
+					abort: vi.fn(async () => {}),
+					dispose: vi.fn(),
+				};
+				return { session } as unknown as CreateAgentSessionResult;
+			},
+		);
+
+		const outcome = await run({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			model: ownModel,
+			createSession,
+		});
+
+		expect(outcome.status).toBe("failed");
+		expect(outcome.error).toContain("bedrock auth failed");
+		expect(outcome.error).toContain("parent auth failed");
+	});
+
+	it("does not fall back when an explicit model is aborted", async () => {
+		const ownModel = { id: "bedrock-claude", provider: "bedrock" } as never;
+		const calls: CreateAgentSessionOptions[] = [];
+
+		const createSession = vi.fn(
+			async (
+				opts: CreateAgentSessionOptions,
+			): Promise<CreateAgentSessionResult> => {
+				calls.push(opts);
+				const session: FakeSession = {
+					messages: [assistant("half", "aborted")],
+					prompt: vi.fn(async () => {}),
+					abort: vi.fn(async () => {}),
+					dispose: vi.fn(),
+				};
+				return { session } as unknown as CreateAgentSessionResult;
+			},
+		);
+
+		const outcome = await run({
+			ctx: fakeContext(),
+			config,
+			prompt: "review this",
+			model: ownModel,
+			createSession,
+		});
+
+		expect(calls).toHaveLength(1);
+		expect(outcome.status).toBe("stopped");
+	});
+
 	it("passes the agent's own tool allowlist to the child session", async () => {
 		const stub = stubFactory();
 		config.tools = ["read", "grep"];

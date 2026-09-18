@@ -1068,7 +1068,7 @@ describe("spawn tool model and effort selection", () => {
 		expect(run.mock.calls[0]?.[0].model).toBe(GEMINI_FLASH);
 	});
 
-	it("refuses an unknown inline model name", async () => {
+	it("falls back to the current model for an unknown inline model name", async () => {
 		const { tool, run } = inlineHarness();
 
 		const result = await tool.execute(
@@ -1079,10 +1079,13 @@ describe("spawn tool model and effort selection", () => {
 			ctx,
 		);
 
+		expect(resultText(result)).toMatch(/nope.*not available/i);
 		expect(resultText(result)).toMatch(
 			/gemini-2\.5-flash[\s\S]*claude-opus-4-5/,
 		);
-		expect(run).not.toHaveBeenCalled();
+		expect(resultText(result)).toMatch(/current model/i);
+		expect(run).toHaveBeenCalledOnce();
+		expect(run.mock.calls[0]?.[0].model).toBeUndefined();
 	});
 
 	it("inherits the parent model and effort for inline defaults", async () => {
@@ -1118,7 +1121,7 @@ describe("spawn tool model and effort selection", () => {
 		expect(run.mock.calls[0]?.[0].thinkingLevel).toBe("off");
 	});
 
-	it("refuses an agent file naming a model that is not configured", async () => {
+	it("falls back to the current model when an agent file names an unconfigured model", async () => {
 		const { tool, run } = harness({
 			agents: [agentConfig({ model: "hallucinated-model" })],
 		});
@@ -1131,8 +1134,10 @@ describe("spawn tool model and effort selection", () => {
 			ctx,
 		);
 
-		expect(resultText(result)).toMatch(/hallucinated-model/);
-		expect(run).not.toHaveBeenCalled();
+		expect(resultText(result)).toMatch(/hallucinated-model.*not available/i);
+		expect(resultText(result)).toMatch(/current model/i);
+		expect(run).toHaveBeenCalledOnce();
+		expect(run.mock.calls[0]?.[0].model).toBeUndefined();
 	});
 
 	it("offers every thinking level in the inline schema", () => {
@@ -1204,7 +1209,7 @@ describe("inline spawn model candidates", () => {
 		expect(selectCalls).toHaveLength(0);
 	});
 
-	it("cannot resolve a catalogue model that scoping excludes", async () => {
+	it("falls back to current model when scoping excludes a catalogue model", async () => {
 		const { tool, run } = inlineHarness();
 		ctx = fakeContext({
 			scoped: [FLASH_37],
@@ -1219,8 +1224,10 @@ describe("inline spawn model candidates", () => {
 			ctx,
 		);
 
-		expect(resultText(result)).toMatch(/unknown model/i);
-		expect(run).not.toHaveBeenCalled();
+		expect(resultText(result)).toMatch(/made-up-foo-flash.*not available/i);
+		expect(resultText(result)).toMatch(/current model/i);
+		expect(run).toHaveBeenCalledOnce();
+		expect(run.mock.calls[0]?.[0].model).toBeUndefined();
 	});
 
 	it("falls back to models with configured auth when nothing is scoped", async () => {
@@ -1353,7 +1360,7 @@ describe("spawn tool ambiguous model selection", () => {
 	});
 
 	it("does not ask about an unknown model, only an ambiguous one", async () => {
-		const { tool } = inlineHarness();
+		const { tool, run } = inlineHarness();
 		ctx = fakeContext({ scoped: [FLASH_36, FLASH_37] });
 
 		const result = await tool.execute(
@@ -1364,8 +1371,11 @@ describe("spawn tool ambiguous model selection", () => {
 			ctx,
 		);
 
-		expect(resultText(result)).toMatch(/unknown model/i);
+		expect(resultText(result)).toMatch(/totally-absent.*not available/i);
+		expect(resultText(result)).toMatch(/current model/i);
 		expect(selectCalls).toHaveLength(0);
+		expect(run).toHaveBeenCalledOnce();
+		expect(run.mock.calls[0]?.[0].model).toBeUndefined();
 	});
 
 	it("asks about an ambiguous model named by the agent file too", async () => {

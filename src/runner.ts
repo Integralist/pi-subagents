@@ -23,6 +23,7 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "./agents.ts";
+import { modelLabel } from "./model-resolver.ts";
 
 /** Default read-only tools assigned when no explicit allowlist is given. */
 export const DEFAULT_SUBAGENT_TOOLS = ["read", "grep", "find", "ls"] as const;
@@ -318,7 +319,7 @@ export async function runSubagent(
 	try {
 		// Inside the child context, so anything the child session does — every
 		// tool call it makes included — is marked as subagent work.
-		return await runInChildContext(() => runSubagentUnguarded(opts));
+		return await runInChildContext(() => runSubagentWithFallback(opts));
 	} catch (error) {
 		return {
 			status: "failed",
@@ -326,6 +327,69 @@ export async function runSubagent(
 			error: new SubagentError(opts.config.name, error).message,
 		};
 	}
+}
+
+async function runSubagentWithFallback(
+	opts: RunSubagentOptions,
+): Promise<SubagentOutcome> {
+	const ownModel = opts.model;
+	const parentModel = opts.ctx.model;
+	const canFallback =
+		ownModel !== undefined &&
+		parentModel !== undefined &&
+		(ownModel.provider !== parentModel.provider ||
+			ownModel.id !== parentModel.id);
+
+	if (!canFallback || !ownModel || !parentModel) {
+		return await runSubagentUnguarded(opts);
+	}
+
+	let firstError: string | undefined;
+	try {
+		const outcome = await runSubagentUnguarded(opts);
+		if (outcome.status !== "failed" || opts.signal?.aborted) {
+			return outcome;
+		}
+		firstError = outcome.error;
+	} catch (error) {
+		if (opts.signal?.aborted) {
+			return { status: "stopped", output: "" };
+		}
+		firstError = describeCause(error);
+	}
+
+	// Model override failed. Retry once with the host's verified model (ctx.model).
+	const fallbackOpts: RunSubagentOptions = { ...opts, model: undefined };
+	const fallbackOutcome = await runSubagentUnguarded(fallbackOpts);
+
+	const failedModel = modelLabel(ownModel);
+	const fallbackModel = modelLabel(parentModel);
+	const prefix = `subagent "${opts.config.name}" failed: `;
+	const cleanReason = firstError?.startsWith(prefix)
+		? firstError.slice(prefix.length)
+		: firstError;
+	const reason = cleanReason ? `: ${cleanReason}` : "";
+
+	if (fallbackOutcome.status === "completed") {
+		const note = `Note: Model "${failedModel}" failed${reason}. Fell back to ${fallbackModel}.\n\n`;
+		return {
+			...fallbackOutcome,
+			output: note + fallbackOutcome.output,
+		};
+	}
+
+	if (fallbackOutcome.status === "failed") {
+		return {
+			status: "failed",
+			output: fallbackOutcome.output,
+			error: failureReason(
+				opts.config.name,
+				`model "${failedModel}" failed${reason}, and fallback to ${fallbackModel} also failed: ${fallbackOutcome.error ?? "unknown error"}`,
+			),
+		};
+	}
+
+	return fallbackOutcome;
 }
 
 async function runSubagentUnguarded(

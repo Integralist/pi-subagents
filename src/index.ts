@@ -150,8 +150,9 @@ function candidateModels(ctx: ExtensionContext): readonly Model<Api>[] {
 
 interface ModelChoice {
 	model?: Model<Api>;
-	/** Set when an ambiguous query was dismissed and the parent's model stands. */
+	/** Set when an ambiguous query was dismissed or an unavailable model fell back. */
 	fellBack: boolean;
+	fallbackReason?: string;
 }
 
 /**
@@ -160,9 +161,8 @@ interface ModelChoice {
  * Naming no model means inheriting the parent's, so `undefined` is a valid
  * answer rather than a failure. An ambiguous name is a question for the user,
  * not a guess: `"flash"` matching two Gemini releases is exactly the case where
- * a human should choose. An unknown name is refused instead, because a name
- * matching nothing is a mistake rather than a decision, and turning every typo
- * into a dialog would train the user to dismiss them.
+ * a human should choose. An unknown name falls back to the parent's verified
+ * model with a note, rather than halting execution.
  */
 async function chooseModel(
 	ctx: ExtensionContext,
@@ -182,10 +182,15 @@ async function chooseModel(
 	}
 
 	if (resolved.reason === "unknown") {
-		throw new Error(
-			`Unknown model "${query}". Available models: ` +
-				`${resolved.available.join(", ")}.`,
-		);
+		const availableList =
+			resolved.available.length > 0
+				? ` Available models: ${resolved.available.join(", ")}.`
+				: "";
+		return {
+			model: undefined,
+			fellBack: true,
+			fallbackReason: `Model "${query}" is not available.${availableList}`,
+		};
 	}
 
 	// Ambiguous. Ask, when there is someone to ask: blocking on a dialog in a
@@ -341,6 +346,7 @@ function describeStart(
 	unknownTools: string[],
 	choice: ModelChoice,
 	shadowed: AgentConfig | undefined,
+	ctx: ExtensionContext,
 ): string {
 	const parts: string[] = [];
 
@@ -355,11 +361,14 @@ function describeStart(
 	}
 
 	if (choice.fellBack) {
-		// Dismissing the dialog leaves the parent's model in play. Saying so keeps
-		// that from being an invisible decision.
+		// Dismissing the dialog or requesting an unavailable model leaves the
+		// parent's model in play. Saying so keeps that from being an invisible
+		// decision.
+		const parentLabel = ctx.model ? ` (${modelLabel(ctx.model)})` : "";
 		parts.push(
-			"No model was chosen for this subagent, so it is running on the " +
-				"current model.",
+			choice.fallbackReason
+				? `Note: ${choice.fallbackReason} Falling back to the current model${parentLabel}.`
+				: `No model was chosen for this subagent, so it is running on the current model${parentLabel}.`,
 		);
 	}
 
@@ -536,7 +545,7 @@ export function createNamedSpawnTool(deps: SpawnToolDeps) {
 				content: [
 					{
 						type: "text" as const,
-						text: describeStart(record, unknownTools, choice, undefined),
+						text: describeStart(record, unknownTools, choice, undefined, ctx),
 					},
 				],
 				details: {
@@ -586,7 +595,8 @@ export function createInlineSpawnTool(deps: SpawnToolDeps) {
 				),
 				model: Type.Optional(
 					Type.String({
-						description: "Model name/id. Defaults to the current model.",
+						description:
+							"Model name/id to use. Defaults to the current session model. Leave unset unless a specific alternative model is required.",
 					}),
 				),
 				thinking: Type.Optional(
@@ -681,6 +691,7 @@ export function createInlineSpawnTool(deps: SpawnToolDeps) {
 							unknownTools,
 							choice,
 							shadowedFile(config, agents),
+							ctx,
 						),
 					},
 				],
@@ -1171,6 +1182,10 @@ async function route(
 		choice = await chooseModel(ctx, config.name, config.model, ctx.signal);
 	} catch (error) {
 		say(`Cannot start "${handle}": ${describeCause(error)}`, "warning");
+		return;
+	}
+	if (choice.fellBack && choice.fallbackReason) {
+		say(`Cannot start "${handle}": ${choice.fallbackReason}`, "warning");
 		return;
 	}
 

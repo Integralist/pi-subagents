@@ -25,7 +25,7 @@ export type ResolveModelResult =
 
 /** How a model is named back to the caller: unambiguous, and copy-pasteable. */
 export function modelLabel(model: Model<Api>): string {
-	return `${model.provider}/${model.id}`;
+	return model.provider ? `${model.provider}/${model.id}` : model.id;
 }
 
 /**
