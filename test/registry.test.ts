@@ -9,6 +9,7 @@ import {
 	SubagentRegistry,
 	type SubagentStatus,
 	trackContextUsage,
+	whenFinished,
 } from "../src/registry.ts";
 
 /**
@@ -110,6 +111,29 @@ describe("SubagentRegistry", () => {
 			}
 
 			expect(registry.running().map((r) => r.id)).toEqual(["running"]);
+		});
+
+		/**
+		 * A queued subagent has not answered either. Leaving it out is what woke
+		 * the main model while a batch larger than the slot count was still going.
+		 */
+		it("counts queued subagents as outstanding alongside running ones", () => {
+			const registry = new SubagentRegistry();
+			const statuses: SubagentStatus[] = [
+				"queued",
+				"running",
+				"completed",
+				"failed",
+				"stopped",
+			];
+			for (const status of statuses) {
+				registry.add(record(status, { status }));
+			}
+
+			expect(registry.outstanding().map((r) => r.id)).toEqual([
+				"queued",
+				"running",
+			]);
 		});
 	});
 
@@ -351,5 +375,66 @@ describe("trackContextUsage", () => {
 		stub.emit(turnEnd());
 
 		expect(listener).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("whenFinished", () => {
+	/** Resolved yet? Read after the event loop has had a turn. */
+	async function settledWithin(promise: Promise<void>, ms: number) {
+		let done = false;
+		void promise.then(() => {
+			done = true;
+		});
+		await new Promise((resolve) => setTimeout(resolve, ms));
+		return done;
+	}
+
+	/**
+	 * The user typing while the main model waits. pi holds their message until
+	 * the tool call returns, so a wait that ignored it would hold them too.
+	 */
+	it("stops waiting once interrupted", async () => {
+		const registry = new SubagentRegistry();
+		registry.add(record("abc123"));
+		let typed = false;
+
+		const wait = whenFinished(registry, "abc123", {
+			interrupted: () => typed,
+			pollMs: 1,
+		});
+		typed = true;
+
+		expect(await settledWithin(wait, 20)).toBe(true);
+	});
+
+	it("keeps waiting while nothing interrupts it", async () => {
+		const registry = new SubagentRegistry();
+		registry.add(record("abc123"));
+
+		const wait = whenFinished(registry, "abc123", {
+			interrupted: () => false,
+			pollMs: 1,
+		});
+
+		expect(await settledWithin(wait, 20)).toBe(false);
+		registry.update("abc123", { status: "completed" });
+		await wait;
+	});
+
+	/**
+	 * A wait given up on is not a wait. Still counted as one, the subagent's
+	 * answer would be held back for a caller that has already left.
+	 */
+	it("stops counting as a waiter once interrupted", async () => {
+		const registry = new SubagentRegistry();
+		registry.add(record("abc123"));
+
+		const wait = whenFinished(registry, "abc123", {
+			interrupted: () => true,
+			pollMs: 1,
+		});
+		await settledWithin(wait, 20);
+
+		expect(registry.isAwaited("abc123")).toBe(false);
 	});
 });

@@ -29,7 +29,7 @@ import extension, {
 import { DEFAULT_CONCURRENCY, SubagentQueue } from "../src/queue.ts";
 import { type SubagentRecord, SubagentRegistry } from "../src/registry.ts";
 import { runInChildContext, type SubagentOutcome } from "../src/runner.ts";
-import type { SendMessage } from "../src/spawn.ts";
+import { renderCompletion, type SendMessage } from "../src/spawn.ts";
 import { SubagentList } from "../src/ui/subagent-list.ts";
 
 function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -85,6 +85,8 @@ interface ContextOptions {
 	hasUI?: boolean;
 	/** What the user picks in the dialog; undefined means they dismissed it. */
 	pick?: string | undefined;
+	/** Whether the user has typed a message pi is holding for the main model. */
+	pending?: () => boolean;
 }
 
 let selectCalls: Array<{
@@ -97,6 +99,7 @@ function fakeContext(options: ContextOptions = {}): ExtensionContext {
 	return {
 		cwd: "/tmp/project",
 		hasUI: options.hasUI ?? true,
+		hasPendingMessages: options.pending ?? (() => false),
 		scopedModels: (options.scoped ?? []).map((model) => ({ model })),
 		modelRegistry: {
 			getAvailable: () => options.available ?? [],
@@ -1600,19 +1603,25 @@ describe("spawn_inline_subagent", () => {
  * conversation to the provider. Waiting turns that loop into one call.
  */
 describe("get_subagent_result waiting for an answer", () => {
-	function waiting(options: { waitMs?: number } = {}) {
+	interface WaitingOptions {
+		waitMs?: number;
+		pollMs?: number;
+	}
+
+	function waiting(options: WaitingOptions = {}) {
 		const started = harness({ defer: true });
 		return {
 			...started,
 			resultTool: createResultTool({
 				registry: started.registry,
 				...(options.waitMs === undefined ? {} : { waitMs: options.waitMs }),
+				...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
 			}),
 		};
 	}
 
 	/** Start one deferred subagent and ask for its result, without waiting. */
-	async function asking(options: { waitMs?: number } = {}) {
+	async function asking(options: WaitingOptions = {}) {
 		const started = waiting(options);
 		await started.tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
 		return started;
@@ -1673,6 +1682,96 @@ describe("get_subagent_result waiting for an answer", () => {
 		);
 
 		expect(resultText(result)).toMatch(/still working/i);
+	});
+
+	/**
+	 * pi holds anything the user types until the running tool call returns, so a
+	 * wait that ignored them would leave them unread for as long as the cap.
+	 *
+	 * Raced against a timer well inside the cap: a wait that only ended at its
+	 * cap would still find the user's message and say so, so the wording alone
+	 * cannot tell yielding from timing out. The turn is abandoned afterwards so a
+	 * wait that never yielded does not outlive the test.
+	 */
+	it("Stops waiting when the user sends a message", async () => {
+		let typed = false;
+		ctx = fakeContext({ pending: () => typed });
+		const { resultTool } = await asking({ waitMs: 5_000, pollMs: 1 });
+		const turn = new AbortController();
+
+		const pending = resultTool.execute(
+			"call-2",
+			{ id: "sub-1" },
+			turn.signal,
+			undefined,
+			ctx,
+		);
+		typed = true;
+		const answered = await Promise.race([
+			pending.then(resultText),
+			new Promise<undefined>((resolve) =>
+				setTimeout(() => resolve(undefined), 200),
+			),
+		]);
+		turn.abort();
+
+		expect(answered).toMatch(/still working/i);
+		expect(answered).toMatch(/the user sent a message/i);
+		// Still working, but not its own sibling.
+		expect(answered).toContain("No other subagents are left to finish.");
+	});
+
+	/**
+	 * The other half: only a message from the user ends the wait early. Polled
+	 * quickly and given time to poll, so a wait that gave way to nothing at all
+	 * would have answered before the subagent finished.
+	 */
+	it("keeps waiting while the user has typed nothing", async () => {
+		ctx = fakeContext({ pending: () => false });
+		const { resultTool, finish } = await asking({ pollMs: 1 });
+
+		const pending = resultTool.execute(
+			"call-2",
+			{ id: "sub-1" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		const early = await Promise.race([
+			pending.then(() => "answered"),
+			new Promise<string>((resolve) =>
+				setTimeout(() => resolve("still waiting"), 20),
+			),
+		]);
+		finish({ status: "completed", output: "two defects found" });
+
+		expect(early).toBe("still waiting");
+		expect(resultText(await pending)).toContain("two defects found");
+	});
+
+	/**
+	 * A waited-for answer is handed back as a tool result, never announced, so
+	 * this is the only place the main model can learn the rest of the batch is
+	 * still out.
+	 */
+	it("names the other subagents still working when it hands back an answer", async () => {
+		const { tool, resultTool, finish } = waiting();
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+		// The harness finishes the last run started, so the one waited on is second.
+		await tool.execute("call-2", VALID_ARGS, undefined, undefined, ctx);
+
+		const pending = resultTool.execute(
+			"call-3",
+			{ id: "sub-2" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		finish({ status: "completed", output: "two defects found" });
+
+		const text = resultText(await pending);
+		expect(text).toContain("two defects found");
+		expect(text).toContain("Still to finish: reviewer (sub-1).");
 	});
 
 	it("answers at once for a subagent that has already finished", async () => {
@@ -1919,6 +2018,7 @@ describe("configuredLimit", () => {
 describe("compact tool results", () => {
 	const plainTheme = {
 		fg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
 	} as unknown as Theme;
 
 	/** The render context carries only what a renderer that ignores it needs. */
@@ -1980,8 +2080,9 @@ describe("compact tool results", () => {
 		expect(draw(tool, result, true).join("\n")).toContain("agent-1");
 	});
 
-	it("draws a subagent's answer as one line", async () => {
-		const { tool, registry, delivered } = harness();
+	/** A finished subagent's answer, read back through the result tool. */
+	async function answered() {
+		const { tool, registry, delivered, sendMessage } = harness();
 		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
 		await delivered;
 		const resultTool = createResultTool({ registry });
@@ -1992,9 +2093,92 @@ describe("compact tool results", () => {
 			undefined,
 			ctx,
 		);
+		return { resultTool, result, sendMessage };
+	}
 
-		expect(draw(resultTool, result, false)).toEqual(["reviewer — completed"]);
+	/**
+	 * A long review asks for results many times over. Each one drawn in pi's
+	 * padded box filled the scrollback with rows that said nothing the list
+	 * below the prompt was not already showing.
+	 */
+	it("draws a subagent's answer as the same one line its notice would", async () => {
+		const { resultTool, result, sendMessage } = await answered();
+		const notice = sendMessage.mock.calls[0]?.[0] as never;
+
+		const drawnNotice = renderCompletion(
+			notice,
+			{ expanded: false, outputPad: 0 },
+			plainTheme,
+		)
+			?.render(60)
+			.map((line) => line.trim());
+
+		expect(draw(resultTool, result, false)).toEqual([
+			"✓ reviewer — review agents file",
+		]);
+		expect(draw(resultTool, result, false)).toEqual(drawnNotice);
+	});
+
+	it("draws a subagent's whole answer when it is expanded", async () => {
+		const { resultTool, result } = await answered();
+
 		expect(draw(resultTool, result, true).join("\n")).toContain("looks fine");
+	});
+
+	/**
+	 * A wait that ended without an answer tells the user nothing: the list
+	 * already shows the subagent working. Drawn at all, it is the clutter.
+	 */
+	it("draws nothing for a subagent still working", async () => {
+		const { tool, registry } = harness({ hang: true });
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+		const resultTool = createResultTool({ registry, waitMs: 5 });
+		const result = await resultTool.execute(
+			"call-2",
+			{ id: "sub-1" },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(draw(resultTool, result, false)).toEqual([]);
+		expect(draw(resultTool, result, true)).toEqual([]);
+	});
+
+	/** The call's own header would be one more row per wait. */
+	it("draws no header for the call", () => {
+		const resultTool = createResultTool({ registry: new SubagentRegistry() });
+
+		const header = resultTool.renderCall?.(
+			{ id: "sub-1" },
+			plainTheme,
+			renderContext,
+		);
+
+		expect(header?.render(60)).toEqual([]);
+	});
+
+	/**
+	 * pi drops a self-drawn row that draws no lines, but pads and colours a
+	 * boxed one whatever is in it — so an empty row in the default box is still
+	 * a blank box in the scrollback.
+	 */
+	it("draws its own row instead of pi's padded box", () => {
+		const resultTool = createResultTool({ registry: new SubagentRegistry() });
+
+		expect(resultTool.renderShell).toBe("self");
+	});
+
+	/** Hiding rows must not hide a call that failed outright. */
+	it("still shows why a call failed", () => {
+		const resultTool = createResultTool({ registry: new SubagentRegistry() });
+		const failed = {
+			content: [{ type: "text", text: 'No subagent with id "sub-9".' }],
+		};
+
+		expect(draw(resultTool, failed, false).join("\n")).toContain(
+			'No subagent with id "sub-9".',
+		);
 	});
 
 	it("draws a started subagent as a compact one line", async () => {

@@ -707,6 +707,30 @@ have, or names a model that would refuse the spawn.
 > notice arriving on its own is still the ordinary path; waiting is
 > for the caller that has run out of other work.
 
+> [!NOTE]
+> Amended 2026-09-27, after a live run with several subagents. Four
+> changes:
+>
+> - **The user's message is a fourth thing that ends a wait.** pi
+>   holds what the user types until the running tool call returns, so
+>   a wait held them for as long as the subagent took. The wait now
+>   checks `hasPendingMessages()` and gives way, and its reply says
+>   the user sent a message. The answer still arrives later as a
+>   notice.
+> - **A queued subagent counts as unfinished.** The main model is woken
+>   only when no subagent is running *or queued*. The queue starts the
+>   next subagent only after the previous one's notice goes out, so
+>   counting only running ones woke the main model mid-batch whenever
+>   there were more subagents than slots.
+> - **Every answer names what is still to finish.** A notice or waited-for
+>   result ends with "Still to finish: …" or "No other subagents are
+>   left to finish.", so one answer of several does not read as the
+>   end of the work.
+> - **Result rows are drawn only when they carry an answer.** A wait
+>   that ends without one draws nothing, since the list already shows
+>   the subagent working. An answer is drawn as the same one line as
+>   its completion notice.
+
 - **No neutral agent files are shipped.** A character supplied at
   spawn time already carries its own prompt and tools, so a
   general-purpose file to specialise through the prompt would be a

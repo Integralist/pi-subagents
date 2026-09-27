@@ -71,6 +71,8 @@ function parentContext(): ExtensionContext {
 		},
 		// The runner reads this to nest each subagent under whoever spawned it.
 		sessionManager: { getSessionFile: () => PARENT_SESSION_FILE },
+		// Nobody types during these runs, so a wait is never interrupted.
+		hasPendingMessages: () => false,
 	} as unknown as ExtensionContext;
 }
 

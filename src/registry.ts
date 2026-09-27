@@ -237,6 +237,21 @@ export class SubagentRegistry {
 	}
 
 	/**
+	 * Every subagent that has not answered yet: running, or waiting for a slot.
+	 *
+	 * The question a batch asks, where `running()` is the question the queue
+	 * asks. A queued subagent is still owed to whoever spawned it, and the queue
+	 * starts one only after the previous run's notice has gone out — so at that
+	 * moment nothing is running, and counting only running subagents reads a
+	 * half-finished batch as a finished one.
+	 */
+	outstanding(): SubagentRecord[] {
+		return this.list().filter(
+			(record) => !TERMINAL_STATUSES.has(record.status),
+		);
+	}
+
+	/**
 	 * Note that somebody is waiting to be handed this subagent's answer, and
 	 * hand back the release.
 	 *
@@ -315,7 +330,24 @@ export interface WaitOptions {
 	signal?: AbortSignal;
 	/** Milliseconds before the wait gives up. Omitted waits indefinitely. */
 	timeoutMs?: number;
+	/**
+	 * Asked every `pollMs`; true ends the wait. The result tool passes whether
+	 * the user has typed something, which pi holds until the tool call returns —
+	 * so a wait that ignored it would hold the user as long as the subagent.
+	 *
+	 * Polled rather than pushed because the question is about pi's own queue of
+	 * held messages, and pi announces nothing when that queue grows.
+	 */
+	interrupted?: () => boolean;
+	/** How often `interrupted` is asked. Defaults to `INTERRUPT_POLL_MS`. */
+	pollMs?: number;
 }
+
+/**
+ * How often a wait asks whether it has been interrupted: quick enough that a
+ * message the user sends feels delivered at once, slow enough to cost nothing.
+ */
+export const INTERRUPT_POLL_MS = 250;
 
 /**
  * Wait for a subagent to reach a terminal status.
@@ -323,8 +355,9 @@ export interface WaitOptions {
  * This is what a caller asking for a result does instead of asking again and
  * again: one call that settles when there is something to say. A wait cannot
  * outlive what it was waiting for — the subagent finishing ends it, the turn
- * being abandoned ends it, and the cap ends it regardless, so a subagent whose
- * provider has stopped answering cannot hold a turn open forever.
+ * being abandoned ends it, an interruption ends it, and the cap ends it
+ * regardless, so a subagent whose provider has stopped answering cannot hold a
+ * turn open forever.
  *
  * Resolves rather than rejects however it ends. The caller reads the record to
  * find out whether there is an answer, which is the same thing it would have
@@ -382,6 +415,17 @@ export function whenFinished(
 			// open for it would delay every exit by up to the cap.
 			timer.unref?.();
 			stops.push(() => clearTimeout(timer));
+		}
+
+		const { interrupted } = options;
+		if (interrupted) {
+			const poll = setInterval(() => {
+				if (interrupted()) {
+					settle();
+				}
+			}, options.pollMs ?? INTERRUPT_POLL_MS);
+			poll.unref?.();
+			stops.push(() => clearInterval(poll));
 		}
 	});
 }

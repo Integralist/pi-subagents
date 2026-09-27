@@ -28,7 +28,12 @@ import {
 	type Theme,
 	type ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, Editor, Text } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	Editor,
+	Text,
+} from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, discoverAgents } from "./agents.ts";
 import { steerSubagent, stopSubagent } from "./control.ts";
@@ -45,6 +50,8 @@ import { describeCause, inChildContext, runSubagent } from "./runner.ts";
 import {
 	COMPLETE_MESSAGE_TYPE,
 	describeCompletion,
+	describeOutstanding,
+	drawSubagentLine,
 	type RunSubagentFn,
 	renderCompletion,
 	resumeSubagent,
@@ -776,6 +783,8 @@ export function createResultTool(deps: {
 	registry: SubagentRegistry;
 	/** How long one call waits before giving up. */
 	waitMs?: number;
+	/** How often the wait checks whether the user has typed. */
+	pollMs?: number;
 }) {
 	return defineTool({
 		name: RESULT_TOOL_NAME,
@@ -789,23 +798,28 @@ export function createResultTool(deps: {
 			}),
 		}),
 
-		async execute(_toolCallId, params, signal) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const record = requireRecord(deps.registry, params.id);
 
 			if (!record.outcome) {
 				await whenFinished(deps.registry, record.id, {
 					signal,
 					timeoutMs: deps.waitMs ?? MAX_WAIT_MS,
+					// pi holds what the user types until this call returns, so the
+					// wait gives way to them rather than keeping them unread.
+					interrupted: () => ctx.hasPendingMessages(),
+					...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
 				});
 			}
 
 			// Read after the wait, not before: the record is updated in place, so
 			// this is the answer that arrived while this call was holding.
-			const text = record.outcome
-				? describeCompletion(record, record.outcome)
-				: `Subagent "${record.type}" (${record.id}) is still working, and ` +
-					"has not finished within the time this call waits. Its result " +
-					"will arrive here on its own when it does.";
+			const text = [
+				record.outcome
+					? describeCompletion(record, record.outcome)
+					: stillWorking(record, ctx.hasPendingMessages()),
+				describeOutstanding(deps.registry, record.id),
+			].join("\n\n");
 
 			return {
 				content: [{ type: "text" as const, text }],
@@ -819,14 +833,54 @@ export function createResultTool(deps: {
 			};
 		},
 
-		renderResult: (result, options, theme) =>
-			compactResult(
-				result,
-				options,
-				theme,
-				`${result.details?.agent ?? "subagent"} — ${result.details?.status ?? "unknown"}`,
-			),
+		// Drawn without pi's padded box, and drawn not at all when a row has
+		// nothing to add: a long review waits many times over, and each wait as
+		// a box filled the scrollback with statuses the list below the prompt
+		// was already showing. pi drops a self-drawn row that draws no lines.
+		renderShell: "self",
+		renderCall: () => new Container(),
+		renderResult: (result, options, theme) => {
+			// Cast as the spawn tools' renderer does: taking `ctx` in `execute`
+			// loses the inference that typed `details` here.
+			const details = result.details as SpawnDetails | undefined;
+			const text = textOf(result);
+			// A call that failed outright carries no details, and hiding it would
+			// hide the only sign that anything went wrong.
+			if (!details?.status) {
+				return new Text(text, 1, 0);
+			}
+			if (!TERMINAL_STATUSES.has(details.status)) {
+				return new Container();
+			}
+			return drawSubagentLine(details, text, options.expanded, theme);
+		},
 	});
+}
+
+/** The text a tool result carries, as the model reads it. */
+function textOf(result: { content: Array<{ type: string }> }): string {
+	return result.content
+		.filter((block): block is { type: "text"; text: string } => {
+			return block.type === "text";
+		})
+		.map((block) => block.text)
+		.join("\n");
+}
+
+/**
+ * Why a wait ended without an answer, so the main model knows what to do next.
+ *
+ * A wait the user interrupted is not a subagent running late: telling the model
+ * "has not finished within the time this call waits" would have it wait again
+ * rather than read the message it was interrupted for.
+ */
+function stillWorking(record: SubagentRecord, userTyped: boolean): string {
+	const name = `Subagent "${record.type}" (${record.id}) is still working`;
+	return userTyped
+		? `${name}. Stopped waiting because the user sent a message: answer ` +
+				"it first. The result will arrive here on its own when it finishes."
+		: `${name}, and has not finished within the time this call waits. Its ` +
+				"result will arrive here on its own when it does.";
 }
 
 /**
@@ -844,14 +898,11 @@ function compactResult(
 	theme: Theme,
 	summary: string,
 ): Component {
-	const full = result.content
-		.filter((block): block is { type: "text"; text: string } => {
-			return block.type === "text";
-		})
-		.map((block) => block.text)
-		.join("\n");
-
-	return new Text(options.expanded ? full : theme.fg("muted", summary), 1, 0);
+	return new Text(
+		options.expanded ? textOf(result) : theme.fg("muted", summary),
+		1,
+		0,
+	);
 }
 
 /**

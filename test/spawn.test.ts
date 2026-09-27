@@ -611,6 +611,60 @@ describe("startSubagent completion", () => {
 		expect(delivered(secondSend).options.triggerTurn).toBe(true);
 	});
 
+	/**
+	 * A batch larger than the slot count. The queue starts the next subagent only
+	 * after this one's notice has gone out, so at that moment nothing is running —
+	 * and counting only running subagents woke the main model with work unread.
+	 */
+	it("does not wake the main model while a sibling is still queued", async () => {
+		const registry = new SubagentRegistry();
+		const queue = new SubagentQueue(1);
+
+		const firstRun = stubRun();
+		const firstSend = stubSend();
+		start(firstRun, firstSend, { registry, queue, id: "sub-1" });
+		start(stubRun(), stubSend(), { registry, queue, id: "sub-2" });
+		expect(registry.get("sub-2")?.status).toBe("queued");
+
+		firstRun.finish({ status: "completed", output: "first done" });
+		await firstSend.delivered;
+
+		expect(delivered(firstSend).options.triggerTurn).toBe(false);
+	});
+
+	/**
+	 * An early notice can reach the main model mid-turn, while it works on
+	 * something the user said. Naming what is still out is what tells it not to
+	 * pick the original task back up on one answer of several.
+	 */
+	it("names the siblings still working in an early notice", async () => {
+		const registry = new SubagentRegistry();
+		const queue = new SubagentQueue(5);
+
+		const firstRun = stubRun();
+		const firstSend = stubSend();
+		start(firstRun, firstSend, { registry, queue, id: "sub-1" });
+		start(stubRun(), stubSend(), { registry, queue, id: "sub-2" });
+
+		firstRun.finish({ status: "completed", output: "first done" });
+		await firstSend.delivered;
+
+		const content = delivered(firstSend).message.content;
+		expect(content).toContain("Still to finish: reviewer-2 (sub-2).");
+		expect(content).toMatch(/do not resume/i);
+	});
+
+	it("says so when nothing else is still working", async () => {
+		start(run, send);
+
+		run.finish({ status: "completed", output: "looks fine" });
+		await send.delivered;
+
+		expect(delivered(send).message.content).toContain(
+			"No other subagents are left to finish.",
+		);
+	});
+
 	it("honours explicit wakeOnFinish: true even when siblings are running", async () => {
 		const registry = new SubagentRegistry();
 		const queue = new SubagentQueue(5);

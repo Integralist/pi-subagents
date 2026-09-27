@@ -18,6 +18,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	MessageRenderer,
+	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Text } from "@earendil-works/pi-tui";
 import type { AgentConfig } from "./agents.ts";
@@ -179,6 +180,35 @@ export function describeCompletion(
 }
 
 /**
+ * What else the main model is still owed, told alongside an answer.
+ *
+ * One answer of several reads like the end of the work unless something says
+ * otherwise. The main model can reach it mid-turn — while it answers the user,
+ * say — and with nothing naming the rest it may pick the original task back up
+ * on a third of the results. Named by handle and id together: the handle is
+ * what the user sees in the list, the id is what the tools take.
+ *
+ * `except` is the subagent the message is about. A finished one is already out
+ * of the count; one still working when a wait gave up is not, and listing it
+ * as its own sibling would read as two.
+ */
+export function describeOutstanding(
+	registry: SubagentRegistry,
+	except: string,
+): string {
+	const others = registry.outstanding().filter((r) => r.id !== except);
+	if (others.length === 0) {
+		return "No other subagents are left to finish.";
+	}
+
+	const names = others.map((r) => `${r.handle} (${r.id})`).join(", ");
+	return (
+		`Still to finish: ${names}. Their results will arrive here on their own; ` +
+		"if your task needs them too, do not resume it yet."
+	);
+}
+
+/**
  * The turn limit for this agent — its own, or the default.
  *
  * Every subagent gets one. An agent file naming no `maxTurns:` would otherwise
@@ -202,19 +232,24 @@ function announce(
 	record: SubagentRecord,
 	outcome: SubagentOutcome,
 	sendMessage: SendMessage,
-	registry?: SubagentRegistry,
+	registry: SubagentRegistry,
 	forceTriggerTurn?: boolean,
 ): void {
+	// Outstanding, not running: see `SubagentRegistry.outstanding` for the
+	// queued sibling that counting only running ones missed.
 	const triggerTurn =
 		forceTriggerTurn ??
 		(record.wakeOnFinish !== undefined
 			? record.wakeOnFinish
-			: (registry?.running().length ?? 0) === 0);
+			: registry.outstanding().length === 0);
 
 	sendMessage(
 		{
 			customType: COMPLETE_MESSAGE_TYPE,
-			content: describeCompletion(record, outcome),
+			content: [
+				describeCompletion(record, outcome),
+				describeOutstanding(registry, record.id),
+			].join("\n\n"),
 			display: true,
 			details: {
 				id: record.id,
@@ -514,17 +549,41 @@ export const renderCompletion: MessageRenderer<SubagentCompleteDetails> = (
 		return undefined;
 	}
 
+	const body = typeof message.content === "string" ? message.content : "";
+	return drawSubagentLine(details, body, options?.expanded ?? false, theme);
+};
+
+/** What a finished subagent's line is drawn from. */
+export interface SubagentLine {
+	agent: string;
+	status: SubagentStatus;
+	description: string;
+}
+
+/**
+ * A finished subagent as one line in the transcript, and its whole answer when
+ * expanded.
+ *
+ * Shared by the completion notice and the result tool, because an answer
+ * reaches the conversation by one or the other and never both. Drawn alike,
+ * the scrollback reads as one line per finished subagent whichever way its
+ * answer happened to arrive.
+ */
+export function drawSubagentLine(
+	line: SubagentLine,
+	body: string,
+	expanded: boolean,
+	theme: Theme,
+): Component {
 	const heading = theme.fg(
-		STATUS_COLOR[details.status],
+		STATUS_COLOR[line.status],
 		theme.bold(
-			`${STATUS_MARK[details.status]} ${details.agent} — ${details.description}`,
+			`${STATUS_MARK[line.status]} ${line.agent} — ${line.description}`,
 		),
 	);
-	if (!options?.expanded) {
+	if (!expanded) {
 		return new Text(heading, 1, 0);
 	}
 
-	const body = typeof message.content === "string" ? message.content : "";
-
 	return new Text(`${heading}\n${theme.fg("muted", body)}`, 1, 0);
-};
+}
