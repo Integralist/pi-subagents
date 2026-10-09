@@ -306,6 +306,29 @@ describe("discoverAgents frontmatter fields", () => {
 		expect(discover()[0]?.tools).toBeUndefined();
 	});
 
+	it.each([true, false])("reads allowModelFallback: %s", (allowed) => {
+		writeAgent(
+			projectAgentDir,
+			"strict.md",
+			`---\nname: strict\ndescription: d\nmodel: cheap\nallowModelFallback: ${allowed}\n---\nb\n`,
+		);
+
+		expect(discover()[0]?.allowModelFallback).toBe(allowed);
+	});
+
+	it.each(['"false"', "0", "null"])(
+		"rejects a non-boolean allowModelFallback: %s rather than enabling fallback",
+		(value) => {
+			writeAgent(
+				projectAgentDir,
+				"invalid.md",
+				`---\nname: invalid\ndescription: d\nallowModelFallback: ${value}\n---\nb\n`,
+			);
+
+			expect(discover()).toHaveLength(0);
+		},
+	);
+
 	it("reads model, colour, and max turns when present", () => {
 		writeAgent(
 			projectAgentDir,

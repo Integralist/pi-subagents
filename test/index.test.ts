@@ -511,6 +511,7 @@ describe("separate spawn tool contracts", () => {
 
 		expect(Object.keys(schema.properties).sort()).toEqual(
 			[
+				"allow_model_fallback",
 				"description",
 				"max_turns",
 				"model",
@@ -1042,6 +1043,86 @@ describe("spawn_named_subagent under a concurrency limit", () => {
 });
 
 describe("spawn tool model and effort selection", () => {
+	it.each(["unknown", "missing", "blank", "dismissed"])(
+		"refuses inline model inheritance when fallback is disabled (%s)",
+		async (selection) => {
+			const { tool, run, registry } = inlineHarness();
+			if (selection === "dismissed") {
+				ctx = fakeContext({ scoped: [FLASH_36, FLASH_37], pick: undefined });
+			}
+			const model = {
+				unknown: "not-a-model",
+				missing: undefined,
+				blank: "   ",
+				dismissed: "flash",
+			}[selection];
+
+			const result = await tool.execute(
+				"call-1",
+				{ ...INLINE_ARGS, model, allow_model_fallback: false },
+				undefined,
+				undefined,
+				ctx,
+			);
+
+			expect(resultText(result)).toMatch(/fallback is disabled/i);
+			expect(run).not.toHaveBeenCalled();
+			expect(registry.list()).toHaveLength(0);
+		},
+	);
+
+	it("passes strict model selection and effort into the inline run", async () => {
+		const { tool, run, registry } = inlineHarness();
+		await tool.execute(
+			"call-1",
+			{
+				...INLINE_ARGS,
+				model: "google/gemini-2.5-flash",
+				thinking: "xhigh",
+				allow_model_fallback: false,
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(run).toHaveBeenCalledOnce();
+		expect(run.mock.calls[0]?.[0].model).toBe(GEMINI_FLASH);
+		expect(run.mock.calls[0]?.[0].thinkingLevel).toBe("xhigh");
+		expect(run.mock.calls[0]?.[0].config.allowModelFallback).toBe(false);
+		// A mention that resumes this run must retain the same model and effort.
+		expect(registry.list()[0]?.config.model).toBe("google/gemini-2.5-flash");
+		expect(registry.list()[0]?.config.thinking).toBe("xhigh");
+	});
+
+	it("refuses an unavailable saved model when its agent file disables fallback", async () => {
+		const { tool, run } = harness({
+			agents: [agentConfig({ model: "unknown", allowModelFallback: false })],
+		});
+		const result = await tool.execute(
+			"call-1",
+			VALID_ARGS,
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(resultText(result)).toMatch(/unknown.*not available/i);
+		expect(resultText(result)).toMatch(/fallback is disabled/i);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("passes a saved agent's strict fallback policy into its run", async () => {
+		const { tool, run } = harness({
+			agents: [agentConfig({ model: "opus", allowModelFallback: false })],
+		});
+		await tool.execute("call-1", VALID_ARGS, undefined, undefined, ctx);
+
+		expect(run).toHaveBeenCalledOnce();
+		expect(run.mock.calls[0]?.[0].model).toBe(CLAUDE_OPUS);
+		expect(run.mock.calls[0]?.[0].config.allowModelFallback).toBe(false);
+	});
+
 	it("honours an explicit inline model and effort", async () => {
 		const { tool, run } = inlineHarness();
 

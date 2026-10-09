@@ -333,8 +333,14 @@ async function runSubagentWithFallback(
 	opts: RunSubagentOptions,
 ): Promise<SubagentOutcome> {
 	const ownModel = opts.model;
+	if (opts.config.allowModelFallback === false && ownModel === undefined) {
+		throw new Error(
+			"An explicit model is required when model fallback is disabled.",
+		);
+	}
 	const parentModel = opts.ctx.model;
 	const canFallback =
+		opts.config.allowModelFallback !== false &&
 		ownModel !== undefined &&
 		parentModel !== undefined &&
 		(ownModel.provider !== parentModel.provider ||

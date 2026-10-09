@@ -263,6 +263,68 @@ describe("runSubagent", () => {
 		expect(outcome.error).toMatch(/reply/i);
 	});
 
+	it.each(["throw", "error"])(
+		"keeps a failed explicit model when fallback is disabled (%s)",
+		async (failure) => {
+			const stub = stubFactory({
+				reply: [assistant("partial", "error", "provider unavailable")],
+				onPrompt: () => {
+					if (failure === "throw") throw new Error("provider unavailable");
+				},
+			});
+			const ownModel = { id: "cheap-model" } as never;
+
+			const outcome = await run({
+				ctx: fakeContext(),
+				config: { ...config, allowModelFallback: false },
+				prompt: "implement the slice",
+				model: ownModel,
+				createSession: stub.createSession,
+			});
+
+			expect(outcome.status).toBe("failed");
+			expect(outcome.error).toContain("provider unavailable");
+			expect(stub.calls).toHaveLength(1);
+			expect(stub.calls[0]?.model).toBe(ownModel);
+		},
+	);
+
+	it("refuses inheritance when fallback is disabled without an explicit model", async () => {
+		const stub = stubFactory();
+		const outcome = await run({
+			ctx: fakeContext(),
+			config: { ...config, allowModelFallback: false },
+			prompt: "implement the slice",
+			createSession: stub.createSession,
+		});
+
+		expect(outcome.status).toBe("failed");
+		expect(outcome.error).toMatch(/explicit model.*fallback is disabled/i);
+		expect(stub.createSession).not.toHaveBeenCalled();
+	});
+
+	it("does not repeat side effects after a strict-model run fails", async () => {
+		const edits: string[] = [];
+		const stub = stubFactory({
+			onPrompt: () => {
+				edits.push("slice edit");
+				throw new Error("provider disconnected after editing");
+			},
+		});
+
+		const outcome = await run({
+			ctx: fakeContext(),
+			config: { ...config, allowModelFallback: false },
+			prompt: "implement the slice",
+			model: { id: "cheap-model" } as never,
+			createSession: stub.createSession,
+		});
+
+		expect(outcome.status).toBe("failed");
+		expect(edits).toEqual(["slice edit"]);
+		expect(stub.calls).toHaveLength(1);
+	});
+
 	it("falls back to the parent model when an explicit model throws a provider error", async () => {
 		const ownModel = { id: "bedrock-claude", provider: "bedrock" } as never;
 		const calls: CreateAgentSessionOptions[] = [];

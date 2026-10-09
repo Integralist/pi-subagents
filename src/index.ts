@@ -169,16 +169,22 @@ interface ModelChoice {
  * answer rather than a failure. An ambiguous name is a question for the user,
  * not a guess: `"flash"` matching two Gemini releases is exactly the case where
  * a human should choose. An unknown name falls back to the parent's verified
- * model with a note, rather than halting execution.
+ * model with a note, unless this definition explicitly disables fallback.
  */
 async function chooseModel(
 	ctx: ExtensionContext,
 	agentName: string,
 	requested: string | undefined,
 	signal: AbortSignal | undefined,
+	allowModelFallback = true,
 ): Promise<ModelChoice> {
 	const query = requested?.trim();
 	if (!query) {
+		if (!allowModelFallback) {
+			throw new Error(
+				"An explicit model is required when model fallback is disabled.",
+			);
+		}
 		return { fellBack: false };
 	}
 
@@ -193,10 +199,14 @@ async function chooseModel(
 			resolved.available.length > 0
 				? ` Available models: ${resolved.available.join(", ")}.`
 				: "";
+		const reason = `Model "${query}" is not available.${availableList}`;
+		if (!allowModelFallback) {
+			throw new Error(`${reason} Model fallback is disabled.`);
+		}
 		return {
 			model: undefined,
 			fellBack: true,
-			fallbackReason: `Model "${query}" is not available.${availableList}`,
+			fallbackReason: reason,
 		};
 	}
 
@@ -215,6 +225,9 @@ async function chooseModel(
 		{ signal },
 	);
 	if (picked === undefined) {
+		if (!allowModelFallback) {
+			throw new Error("No model was chosen. Model fallback is disabled.");
+		}
 		return { fellBack: true };
 	}
 
@@ -299,7 +312,10 @@ function resolveInlineConfig(params: {
 	system_prompt: string;
 	description: string;
 	tools?: string[];
+	model?: string;
+	thinking?: string;
 	max_turns?: number;
+	allow_model_fallback?: boolean;
 }): AgentConfig {
 	const name = params.name.trim();
 	if (!name) {
@@ -316,7 +332,10 @@ function resolveInlineConfig(params: {
 		description: params.description,
 		systemPrompt,
 		tools: params.tools,
+		model: params.model,
+		thinking: params.thinking as ThinkingLevel | undefined,
 		maxTurns: params.max_turns,
+		allowModelFallback: params.allow_model_fallback,
 		source: "inline",
 	};
 }
@@ -415,6 +434,7 @@ const INLINE_SPAWN_KEYS = new Set([
 	"thinking",
 	"max_turns",
 	"wake_on_finish",
+	"allow_model_fallback",
 ]);
 
 /** Input keys a direct caller supplied outside one tool's public contract. */
@@ -524,7 +544,13 @@ export function createNamedSpawnTool(deps: SpawnToolDeps) {
 
 			let choice: ModelChoice;
 			try {
-				choice = await chooseModel(ctx, config.name, config.model, signal);
+				choice = await chooseModel(
+					ctx,
+					config.name,
+					config.model,
+					signal,
+					config.allowModelFallback,
+				);
 			} catch (error) {
 				return spawnRefusal(config.name, params.description, error);
 			}
@@ -606,6 +632,12 @@ export function createInlineSpawnTool(deps: SpawnToolDeps) {
 							"Model name/id to use. Defaults to the current session model. Leave unset unless a specific alternative model is required.",
 					}),
 				),
+				allow_model_fallback: Type.Optional(
+					Type.Boolean({
+						description:
+							"Allow substitution or retry on the main model. Defaults to true. Set false with an explicit model to refuse fallback.",
+					}),
+				),
 				thinking: Type.Optional(
 					Type.String({
 						enum: [...THINKING_LEVELS],
@@ -667,13 +699,24 @@ export function createInlineSpawnTool(deps: SpawnToolDeps) {
 
 			let choice: ModelChoice;
 			try {
-				choice = await chooseModel(ctx, config.name, params.model, signal);
+				choice = await chooseModel(
+					ctx,
+					config.name,
+					params.model,
+					signal,
+					config.allowModelFallback,
+				);
 			} catch (error) {
 				return spawnRefusal(config.name, params.description, error);
 			}
 
 			const agents = deps.discover(ctx.cwd);
-			const inlineConfig = { ...config, tools };
+			const inlineConfig = {
+				...config,
+				tools,
+				// Resume the selected model, not an ambiguous query. Omission still inherits.
+				model: choice.model ? modelLabel(choice.model) : undefined,
+			};
 			const record = startSubagent({
 				ctx,
 				config: inlineConfig,
@@ -1230,7 +1273,13 @@ async function route(
 	// quietly running the subagent on something else.
 	let choice: ModelChoice;
 	try {
-		choice = await chooseModel(ctx, config.name, config.model, ctx.signal);
+		choice = await chooseModel(
+			ctx,
+			config.name,
+			config.model,
+			ctx.signal,
+			config.allowModelFallback,
+		);
 	} catch (error) {
 		say(`Cannot start "${handle}": ${describeCause(error)}`, "warning");
 		return;

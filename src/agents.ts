@@ -47,6 +47,8 @@ export interface AgentConfig {
 	color?: string;
 	maxTurns?: number;
 	wakeOnFinish?: boolean;
+	/** Defaults to true; false requires an explicit model and prevents substitution. */
+	allowModelFallback?: boolean;
 	source: AgentSource;
 	/** Absent for a definition supplied at spawn time, which has no file. */
 	filePath?: string;
@@ -69,6 +71,7 @@ type AgentFrontmatter = {
 	thinking?: unknown;
 	color?: unknown;
 	maxTurns?: unknown;
+	allowModelFallback?: unknown;
 };
 
 const THINKING_LEVELS: readonly ThinkingLevel[] = [
@@ -140,6 +143,14 @@ function toAgentConfig(
 		return undefined;
 	}
 
+	const allowModelFallback = frontmatter.allowModelFallback;
+	if (
+		allowModelFallback !== undefined &&
+		typeof allowModelFallback !== "boolean"
+	) {
+		return undefined;
+	}
+
 	return {
 		name,
 		description,
@@ -149,6 +160,7 @@ function toAgentConfig(
 		thinking: parseThinkingLevel(frontmatter.thinking),
 		color: parseString(frontmatter.color),
 		maxTurns: parseMaxTurns(frontmatter.maxTurns),
+		allowModelFallback,
 		source,
 		filePath,
 	};

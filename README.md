@@ -73,9 +73,10 @@ character:
 - _"Create a read-only performance analyst to review src/queue.ts"_
 - _"Use the saved reviewer subagent to inspect the current diff"_
 
-A saved subagent always uses its agent file's model, thinking level, tools,
-system prompt, and turn limit. A caller-defined inline subagent may choose its
-own execution settings. Model queries resolve fuzzily against configured
+A saved subagent takes its model setting, thinking level, tools, system prompt,
+and turn limit from its agent file. Model selection is subject to the
+[fallback policy](#control-model-fallback); omitting `model` inherits the main
+model. A caller-defined inline subagent may choose its own execution settings. Model queries resolve fuzzily against configured
 providers (for example, `"flash"`, `"haiku"`, or `"gemini 3.7"`). An ambiguous
 query opens an interactive model-selection dialog.
 
@@ -153,8 +154,8 @@ the user to invent one. An inline call does not inherit or compose with an agent
 file, even when their names match.
 
 Required inline fields are `name`, `system_prompt`, `prompt`, and `description`.
-Optional inline fields are `tools`, `model`, `thinking`, `max_turns`, and
-`wake_on_finish`.
+Optional inline fields are `tools`, `model`, `thinking`, `max_turns`,
+`wake_on_finish`, and `allow_model_fallback`.
 
 ### Reusable Agent Files
 
@@ -197,6 +198,37 @@ Optional agent-file frontmatter fields, set in the file rather than at launch:
 - `thinking`: reasoning effort such as `off`, `low`, or `high`.
 - `color`: terminal colour; omission selects the next palette colour.
 - `maxTurns`: turns before the wrap-up warning; the default is 20.
+- `allowModelFallback`: whether to substitute or retry on the main model;
+  defaults to `true`. Set the YAML boolean `false` to require an explicit
+  model and refuse fallback. Non-boolean values make the agent file invalid.
+
+### Control Model Fallback
+
+By default, an unavailable model or a dismissed model-selection dialog uses
+the main model. A run that fails on a different explicit model also retries
+once on the main model. Existing subagents keep this behaviour.
+
+For a subagent that must stay on its selected model, pass
+`allow_model_fallback: false` to `spawn_inline_subagent`, or set
+`allowModelFallback: false` in its saved agent file. Both spellings require an
+explicit model. An unavailable model, dismissed selection, or missing model
+refuses to start; a runtime failure returns a failed outcome without retrying
+on the main model. Inline model, thinking, and fallback settings persist when
+that subagent is resumed through `@handle`.
+
+```json
+{
+  "model": "provider/model-id",
+  "thinking": "xhigh",
+  "allow_model_fallback": false
+}
+```
+
+Replace `provider/model-id` with an available model; these are the execution
+fields to include alongside the required inline character and task fields.
+The flag controls model fallback, not thinking-level support or test outcomes.
+Inspect partial changes before retrying a failed run: neither mode rolls back
+edits made before failure.
 
 ### Discovery Tiers
 

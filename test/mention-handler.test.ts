@@ -330,6 +330,60 @@ describe("the @name handler", () => {
 			expect(lastNotice()).not.toMatch(/no agent file/i);
 		});
 
+		it.each(["test/cheap", "cheap"])(
+			"resumes a strict inline model and effort without reselecting (%s)",
+			async (model) => {
+				const cheap = { provider: "test", id: "cheap", name: "Cheap" };
+				const other = { provider: "other", id: "cheap", name: "Other cheap" };
+				const select = vi.fn().mockResolvedValueOnce("test/cheap");
+				const ctx = context({
+					modelRegistry: {
+						getAvailable: () => [cheap, other],
+						getAll: () => [cheap, other],
+					} as unknown as ExtensionContext["modelRegistry"],
+					ui: { ...context().ui, select } as ExtensionContext["ui"],
+				});
+				const spawn = createInlineSpawnTool({
+					discover: () => agents,
+					run: run.run,
+					getKnownTools: () => ["read"],
+					registry,
+					queue,
+					sendMessage: sendMessage as unknown as SendMessage,
+					newId: () => "sub-1",
+				});
+				await spawn.execute(
+					"call-1",
+					{
+						name: "slice",
+						system_prompt: "Implement only the assigned slice.",
+						prompt: "implement slice 1",
+						description: "implement slice one",
+						model,
+						thinking: "xhigh",
+						allow_model_fallback: false,
+					},
+					undefined,
+					undefined,
+					ctx,
+				);
+				registry.update("sub-1", {
+					status: "completed",
+					outcome: { status: "completed", output: "done" },
+					sessionFile: __filename,
+				});
+				run.calls.length = 0;
+
+				await submit("@slice correct the boundary test", { ctx });
+
+				expect(run.calls).toHaveLength(1);
+				expect(run.calls[0]?.model).toBe(cheap);
+				expect(run.calls[0]?.thinkingLevel).toBe("xhigh");
+				expect(run.calls[0]?.config.allowModelFallback).toBe(false);
+				expect(select).toHaveBeenCalledTimes(model === "cheap" ? 1 : 0);
+			},
+		);
+
 		/**
 		 * The stored definition is not a fallback for a file-backed subagent. Its
 		 * file having gone means the agent is gone, and resuming it under the copy
