@@ -80,6 +80,44 @@ model. A caller-defined inline subagent may choose its own execution settings. M
 providers (for example, `"flash"`, `"haiku"`, or `"gemini 3.7"`). An ambiguous
 query opens an interactive model-selection dialog.
 
+### Physical and Virtual Main Selections
+
+Subagents run physical models only. They do not load the main session's router
+or change its selected model or effort. No Auto extension is required.
+
+- With a physical main selection, omitted settings inherit that selected model
+  and effort, even if an older response came from another model.
+- With a native virtual selection, inheritance uses the latest successful
+  physical assistant response on the active branch. Its catalog model and its
+  recorded effort belong together; failed or aborted responses and opaque
+  router state are not evidence. The virtual selection's effort is never reused.
+- If that physical target is unknown or no longer in the catalog, name an
+  explicit physical model. An effort-only override is not enough. Explicit
+  model and effort overrides apply independently; if no physical effort is
+  known and effort is omitted, the subagent SDK chooses its default.
+- Model choices exclude virtual entries, including entries listed alongside
+  physical models under the same provider. An explicit virtual target refuses
+  to start rather than silently substituting another model.
+
+Startup and resume capture their physical settings before waiting for a slot.
+Later main-selection or routing changes do not alter accepted runs. Allowed
+runtime fallback uses the captured physical main pair, preserving any explicit
+subagent effort. If that fallback is unknown, the original failure is reported
+with guidance to choose a physical model; it never retries a virtual label or
+an unspecified SDK model. The strict no-fallback policy below is unchanged.
+
+The default runner uses the chosen physical provider's public parent transport
+and auth API, including providers registered only by a parent extension. The
+child does not reload that extension or copy its stored credentials. Only the
+chosen physical model is available in the child; no virtual definitions or
+other provider catalogs are inherited. A missing parent provider fails with
+guidance rather than silently using a default transport. Allowed fallback
+still uses only the captured physical pair described above.
+
+Queued rows show accepted settings. Once a session is created, rows show the
+model and effort actually applied by Pi, including fallback and effort clamping.
+The same rules apply to named spawns, inline spawns, and mention startup/resume.
+
 ## Interacting with Subagents
 
 ### Subagent List
@@ -206,7 +244,8 @@ Optional agent-file frontmatter fields, set in the file rather than at launch:
 
 By default, an unavailable model or a dismissed model-selection dialog uses
 the main model. A run that fails on a different explicit model also retries
-once on the main model. Existing subagents keep this behaviour.
+once on the captured physical main model. These substitutions require a known
+physical target as described above.
 
 For a subagent that must stay on its selected model, pass
 `allow_model_fallback: false` to `spawn_inline_subagent`, or set
@@ -328,7 +367,32 @@ make verify
 | `make typecheck`  | TypeScript type checking (`tsc --noEmit`)        |
 | `make lint`       | Lint and formatting check with Biome             |
 | `make format`     | Apply formatting and safe lint fixes with Biome  |
-| `make load-check` | Extension resolution via Pi's jiti loader        |
+| `make load-check` | Six tools registered through Pi's public loader  |
+| `make host-check` | Offline type, test, lint, and public-load checks |
+
+The compatibility checks cover the installed Pi 0.84.2 physical host and Pi
+1.2.0 native virtual host. They do not establish compatibility with untested
+versions or installation readiness. Development pins and the lockfile are
+unchanged; no dependency installation is needed for an already installed host.
+
+To check another installed host, supply the directory containing its
+`node_modules` (not a router source dependency):
+
+```bash
+PI_SDK_ROOT=/path/to/installed-host make host-check
+```
+
+The host check disables Vitest and Jiti caches and aliases only the public Pi
+packages and TypeBox. Both hosts exercise the production-default SDK factory
+without a session-factory override, using parent-extension-only faux transports
+and synthetic API-key/OAuth credentials. Pi 1.2.0 also checks native virtual
+inheritance through that default path.
+
+Separate native registered-tool and mention tests use the injected session
+factory seam with an isolated faux runtime. They check caller behavior, queue
+capture and resume, not the default transport handoff. All child sessions are
+extension-free; no Auto extension, live provider calls or real credentials are
+used.
 
 ## Licence
 

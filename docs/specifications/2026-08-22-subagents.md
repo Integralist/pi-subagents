@@ -585,6 +585,108 @@ Feature: Discovering agent files
     Then "explore" is offered
 ```
 
+## Physical Inheritance Contract
+
+Subagents run physical models without a router dependency. The following
+criteria refine model inheritance and the existing fallback policy; they do
+not change named-file authority, explicit-setting persistence, or tool access.
+
+```gherkin
+Feature: Inheriting a physical model and effort
+  Scenario: Selected physical settings are authoritative
+    Given the main selection is physical B at low effort
+    And an older response came from physical A at high effort
+    When a subagent starts without overrides
+    Then it runs physical B at low effort
+
+  Scenario: A native virtual selection has physical evidence
+    Given the main selection is a virtual model at low effort
+    And its latest successful active-branch response is physical A at xhigh
+    When a named, inline, or mention subagent starts without overrides
+    Then it runs physical A at xhigh effort without loading a router
+    And failed responses, aborted responses, and abandoned branches are ignored
+    And the main selection remains unchanged
+
+  Scenario: A physical provider is registered only by the parent extension
+    Given the chosen physical provider is registered by a parent extension
+    And its credentials are owned by the parent
+    When the default runner creates a subagent without a factory override
+    Then the actual SDK dispatches through that public physical transport
+    And request auth is resolved through the parent's public auth API
+    And the child exposes only the chosen physical model
+    And no parent extension or virtual routing definition is loaded in the child
+
+  Scenario: A required parent provider is missing
+    Given an explicit physical model has no configured public parent provider
+    And model fallback is disabled
+    When the default runner starts the subagent
+    Then it fails with guidance before creating a session or dispatching
+    And no default provider transport is substituted
+
+  Scenario: Physical inheritance is unknown
+    Given the main selection is virtual with no usable physical evidence
+    When a subagent starts without an explicit physical model
+    Then no record or session is created
+    And the refusal asks for an explicit physical model
+
+  Scenario: Explicit settings apply independently
+    Given the main selection is virtual with no usable physical evidence
+    When a subagent names an explicit physical model
+    Then that model is used
+    And explicit effort is preserved when supplied
+    And omitted effort is left to Pi rather than copied from the virtual level
+
+  Scenario: A virtual entry is not a subagent target
+    Given a provider lists both physical and virtual models
+    When a subagent explicitly names a virtual model
+    Then no subagent starts
+    And model-selection dialogs offer physical candidates only
+
+  Scenario: Queued startup and resume retain accepted settings
+    Given a subagent has accepted physical model and effort settings
+    When the main selection changes while startup or resume waits for a slot
+    Then the subagent still uses its accepted physical settings
+
+  Scenario: Allowed runtime fallback uses captured physical settings
+    Given a subagent names an explicit physical model that fails
+    And its policy allows fallback to a known physical main pair
+    When it retries
+    Then it retries once on that captured physical model
+    And an explicit subagent effort overrides the captured effort
+    And its row and notice report the applied physical settings
+
+  Scenario: Unknown fallback cannot retry a virtual or default model
+    Given an explicit physical subagent model fails
+    And the main physical pair is unknown
+    Then the original failure is retained with explicit physical-model guidance
+    And no fallback session is created
+
+  Scenario: Strict fallback still requires an explicit model
+    Given the subagent policy disables model fallback
+    When no explicit model is supplied
+    Then inherited settings do not satisfy the explicit-model requirement
+    And no subagent starts
+
+  Scenario: Rows report the applied effort
+    Given an explicit effort is not supported by the chosen physical model
+    When Pi clamps the effort during session creation
+    Then the subagent row shows the clamped effort rather than the request
+```
+
+These criteria are exercised through Vitest, not a separate Cucumber runner.
+The host matrix checks 0.84.2 physical behavior and 1.2.0 native behavior
+offline; it is not a claim about other host versions or installation readiness.
+Both hosts run the actual default SDK factory without an injected session
+factory, dispatching parent-extension-only faux providers with synthetic
+API-key/OAuth credentials. Native virtual inheritance also uses that default
+path on 1.2.0. A transport control removes only the runtime handoff in memory
+and must fail physical dispatch; resolver failures or setup errors do not count.
+
+The existing native tool/input tests separately inject an isolated faux runtime
+through the session-factory seam. Those tests establish caller, queue and resume
+behavior, not production-default transport. The default runner's physical-only
+runtime bridge does not change the contract of an explicitly supplied factory.
+
 ## Testing Seams
 
 - **Tool boundary** — the `execute()` function of each registered
