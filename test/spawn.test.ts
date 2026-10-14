@@ -36,7 +36,10 @@ function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	};
 }
 
-const ctx = { cwd: "/tmp/project" } as unknown as ExtensionContext;
+const ctx = {
+	cwd: "/tmp/project",
+	model: { provider: "test", id: "main" },
+} as unknown as ExtensionContext;
 
 /** A promise a test settles by hand, so a run finishes exactly when asked. */
 function deferred<T>() {

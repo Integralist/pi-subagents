@@ -4,7 +4,7 @@
 # committing: it is the four checks the plan's verification section names.
 
 .DEFAULT_GOAL := help
-.PHONY: help install test watch typecheck lint format load-check verify try agents clean
+.PHONY: help install test watch typecheck lint format load-check host-check verify try agents clean
 
 PI ?= pi
 
@@ -32,6 +32,9 @@ format: ## Apply the formatter and every safe lint fix
 
 load-check: ## Load the extension through pi's own loader, as pi will
 	node scripts/load-check.mjs
+
+host-check: ## Offline type, test and load checks; optional PI_SDK_ROOT selects an installed host
+	node scripts/host-check.mjs
 
 verify: test typecheck lint load-check ## Everything above, in one go
 

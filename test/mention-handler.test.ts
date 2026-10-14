@@ -11,6 +11,7 @@ import { type SubagentRecord, SubagentRegistry } from "../src/registry.ts";
 import type { RunSubagentOptions, SubagentOutcome } from "../src/runner.ts";
 import type { SendMessage } from "../src/spawn.ts";
 import { startSubagent } from "../src/spawn.ts";
+import { type ToolContext, toolContext } from "./tool-context.ts";
 
 function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	return {
@@ -53,8 +54,10 @@ beforeEach(() => {
  * Only what the handler reaches for. `notify` is the whole of its output, so
  * every test reads what it said there.
  */
-function context(overrides: Partial<ExtensionContext> = {}): ExtensionContext {
-	return {
+function context(overrides: Partial<ExtensionContext> = {}): ToolContext {
+	return toolContext({
+		model: { provider: "test", id: "main", name: "Main" },
+		thinkingLevel: "high",
 		cwd: "/work",
 		hasUI: true,
 		scopedModels: [],
@@ -66,7 +69,7 @@ function context(overrides: Partial<ExtensionContext> = {}): ExtensionContext {
 			},
 		},
 		...overrides,
-	} as unknown as ExtensionContext;
+	} as unknown as ExtensionContext);
 }
 
 function handler() {

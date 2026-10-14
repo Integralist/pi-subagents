@@ -31,6 +31,7 @@ import { type SubagentRecord, SubagentRegistry } from "../src/registry.ts";
 import { runInChildContext, type SubagentOutcome } from "../src/runner.ts";
 import { renderCompletion, type SendMessage } from "../src/spawn.ts";
 import { SubagentList } from "../src/ui/subagent-list.ts";
+import { type ToolContext, toolContext } from "./tool-context.ts";
 
 function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	return {
@@ -95,8 +96,10 @@ let selectCalls: Array<{
 	signal?: AbortSignal;
 }>;
 
-function fakeContext(options: ContextOptions = {}): ExtensionContext {
-	return {
+function fakeContext(options: ContextOptions = {}): ToolContext {
+	return toolContext({
+		model: { provider: "test", id: "main", name: "Main" },
+		thinkingLevel: "high",
 		cwd: "/tmp/project",
 		hasUI: options.hasUI ?? true,
 		hasPendingMessages: options.pending ?? (() => false),
@@ -117,7 +120,7 @@ function fakeContext(options: ContextOptions = {}): ExtensionContext {
 				},
 			),
 		},
-	} as unknown as ExtensionContext;
+	} as unknown as ExtensionContext);
 }
 
 /** Text content joined out of a tool result, the way the model would read it. */
@@ -248,7 +251,7 @@ const INLINE_ARGS = {
 	description: "security review",
 };
 
-let ctx: ExtensionContext;
+let ctx: ToolContext;
 
 beforeEach(() => {
 	selectCalls = [];

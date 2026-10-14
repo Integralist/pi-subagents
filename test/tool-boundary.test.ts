@@ -1,3 +1,4 @@
+import { type ToolContext, toolContext } from "./tool-context.ts";
 /**
  * The tool boundary, wired end to end.
  *
@@ -59,8 +60,8 @@ function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 /** The transcript the user's own session is writing to. */
 const PARENT_SESSION_FILE = "/tmp/pi-subagents-parent-session.jsonl";
 
-function parentContext(): ExtensionContext {
-	return {
+function parentContext(): ToolContext {
+	return toolContext({
 		cwd: process.cwd(),
 		model: PARENT_MODEL,
 		thinkingLevel: "high",
@@ -73,7 +74,7 @@ function parentContext(): ExtensionContext {
 		sessionManager: { getSessionFile: () => PARENT_SESSION_FILE },
 		// Nobody types during these runs, so a wait is never interrupted.
 		hasPendingMessages: () => false,
-	} as unknown as ExtensionContext;
+	} as unknown as ExtensionContext);
 }
 
 function assistant(text: string, stopReason = "stop", errorMessage?: string) {
@@ -220,7 +221,7 @@ const ARGS = {
 	description: "review agents file",
 };
 
-let ctx: ExtensionContext;
+let ctx: ToolContext;
 
 beforeEach(() => {
 	ctx = parentContext();

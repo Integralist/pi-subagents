@@ -12,6 +12,7 @@ import { SubagentQueue } from "../src/queue.ts";
 import { SubagentRegistry } from "../src/registry.ts";
 import { runSubagent } from "../src/runner.ts";
 import type { SendMessage } from "../src/spawn.ts";
+import { toolContext } from "./tool-context.ts";
 
 const scratch: string[] = [];
 afterEach(() => {
@@ -38,13 +39,13 @@ describe("inline model fallback integration", () => {
 				id: "premium",
 				name: "Premium",
 			} as Model<Api>;
-			const ctx = {
+			const ctx = toolContext({
 				cwd: dir,
 				model: premium,
 				thinkingLevel: "xhigh",
 				scopedModels: [{ model: cheap }],
 				sessionManager: { getSessionFile: () => undefined },
-			} as unknown as ExtensionContext;
+			} as unknown as ExtensionContext);
 			const attempts: string[] = [];
 			const registry = new SubagentRegistry();
 			let delivered!: () => void;

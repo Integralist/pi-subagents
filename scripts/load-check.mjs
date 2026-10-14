@@ -1,27 +1,42 @@
-/**
- * Load the extension the way pi loads it.
- *
- * Vitest resolves imports its own way, so a green test suite does not prove pi
- * can load this at all: the `.ts` suffixes on every import and the `src/ui/`
- * directory both have to resolve under pi's bundled jiti loader. That loader is
- * not a dependency of this package — it comes with pi — so it is imported from
- * inside pi's own `node_modules`, which is also why this script has to live in
- * the repository rather than in a temporary directory.
- *
- * Run it with `make load-check`. It prints the extension's default export and
- * exits non-zero if the module cannot be loaded.
- */
+/** Verify all six tools through the host's public loader, with no discovery. */
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { createJiti } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
-
-const jiti = createJiti(import.meta.url, { interopDefault: true });
-const extension = await jiti.import("../src/index.ts", { default: true });
-
-if (typeof extension !== "function") {
-	console.error(
-		`the extension's default export is ${typeof extension}, not a function`,
+const sdkRoot = process.env.PI_SDK_ROOT
+	? resolve(process.env.PI_SDK_ROOT)
+	: fileURLToPath(new URL("..", import.meta.url));
+const packageDir = join(
+	sdkRoot,
+	"node_modules/@earendil-works/pi-coding-agent",
+);
+const metadata = JSON.parse(
+	readFileSync(join(packageDir, "package.json"), "utf8"),
+);
+const entry = metadata.exports?.["."]?.import ?? metadata.main;
+const { discoverAndLoadExtensions } = await import(
+	pathToFileURL(resolve(packageDir, entry)).href
+);
+const scratch = mkdtempSync(join(tmpdir(), "pi-subagents-load-"));
+try {
+	const result = await discoverAndLoadExtensions(
+		[fileURLToPath(new URL("../src/index.ts", import.meta.url))],
+		scratch,
+		scratch,
 	);
-	process.exit(1);
+	assert.deepEqual(result.errors, []);
+	assert.equal(result.extensions.length, 1);
+	assert.deepEqual([...result.extensions[0].tools.keys()].sort(), [
+		"get_subagent_result",
+		"list_subagents",
+		"spawn_inline_subagent",
+		"spawn_named_subagent",
+		"steer_subagent",
+		"stop_subagent",
+	]);
+	console.log("loaded: six subagent tools through the public host loader");
+} finally {
+	rmSync(scratch, { recursive: true, force: true });
 }
-
-console.log("loaded: the extension resolves under pi's own loader");
