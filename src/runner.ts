@@ -10,7 +10,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	InMemoryCredentialStore,
+	InMemoryModelsStore,
+	type Model,
+} from "@earendil-works/pi-ai";
 import {
 	type AgentSession,
 	type CreateAgentSessionOptions,
@@ -19,11 +24,18 @@ import {
 	DefaultResourceLoader,
 	type ExtensionContext,
 	getAgentDir,
+	ModelRuntime,
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "./agents.ts";
-import { modelLabel } from "./model-resolver.ts";
+import {
+	isPhysicalModel,
+	modelLabel,
+	type PhysicalSettings,
+	type ResolvedSubagentSettings,
+	resolveSubagentSettings,
+} from "./model-resolver.ts";
 
 /** Default read-only tools assigned when no explicit allowlist is given. */
 export const DEFAULT_SUBAGENT_TOOLS = ["read", "grep", "find", "ls"] as const;
@@ -73,6 +85,8 @@ export interface RunSubagentOptions {
 	model?: Model<Api>;
 	/** Overrides the parent's reasoning effort. Omitted means inherit. */
 	thinkingLevel?: ThinkingLevel;
+	/** Captured before queue submission, including override provenance. */
+	resolved?: ResolvedSubagentSettings;
 	signal?: AbortSignal;
 	createSession?: SessionFactory;
 	/**
@@ -332,27 +346,54 @@ export async function runSubagent(
 async function runSubagentWithFallback(
 	opts: RunSubagentOptions,
 ): Promise<SubagentOutcome> {
-	const ownModel = opts.model;
-	if (opts.config.allowModelFallback === false && ownModel === undefined) {
+	if (opts.signal?.aborted) return { status: "stopped", output: "" };
+	const settings =
+		opts.resolved ??
+		resolveSubagentSettings(
+			opts.ctx,
+			opts.model,
+			opts.thinkingLevel ?? opts.config.thinking,
+			opts.config.allowModelFallback,
+		);
+	if (opts.config.allowModelFallback === false && !settings.explicitModel) {
 		throw new Error(
 			"An explicit model is required when model fallback is disabled.",
 		);
 	}
-	const parentModel = opts.ctx.model;
+	const ownModel = settings.model;
+	const fallback = settings.fallback;
 	const canFallback =
 		opts.config.allowModelFallback !== false &&
-		ownModel !== undefined &&
-		parentModel !== undefined &&
-		(ownModel.provider !== parentModel.provider ||
-			ownModel.id !== parentModel.id);
-
-	if (!canFallback || !ownModel || !parentModel) {
-		return await runSubagentUnguarded(opts);
+		settings.explicitModel &&
+		fallback &&
+		(ownModel.provider !== fallback.model.provider ||
+			ownModel.id !== fallback.model.id);
+	if (!canFallback || !fallback) {
+		let outcome: SubagentOutcome;
+		try {
+			outcome = await runSubagentUnguarded(opts, settings);
+		} catch (error) {
+			if (fallback || opts.config.allowModelFallback === false) throw error;
+			throw new Error(
+				`${describeCause(error)} Choose an explicit physical model; the main model's physical fallback is unknown.`,
+			);
+		}
+		if (
+			outcome.status === "failed" &&
+			opts.config.allowModelFallback !== false &&
+			!fallback
+		) {
+			return {
+				...outcome,
+				error: `${outcome.error} Choose an explicit physical model; the main model's physical fallback is unknown.`,
+			};
+		}
+		return outcome;
 	}
 
 	let firstError: string | undefined;
 	try {
-		const outcome = await runSubagentUnguarded(opts);
+		const outcome = await runSubagentUnguarded(opts, settings);
 		if (outcome.status !== "failed" || opts.signal?.aborted) {
 			return outcome;
 		}
@@ -364,12 +405,11 @@ async function runSubagentWithFallback(
 		firstError = describeCause(error);
 	}
 
-	// Model override failed. Retry once with the host's verified model (ctx.model).
-	const fallbackOpts: RunSubagentOptions = { ...opts, model: undefined };
-	const fallbackOutcome = await runSubagentUnguarded(fallbackOpts);
+	// Retry once on the physical pair accepted with this run, never a router.
+	const fallbackOutcome = await runSubagentUnguarded(opts, fallback);
 
 	const failedModel = modelLabel(ownModel);
-	const fallbackModel = modelLabel(parentModel);
+	const fallbackModel = modelLabel(fallback.model);
 	const prefix = `subagent "${opts.config.name}" failed: `;
 	const cleanReason = firstError?.startsWith(prefix)
 		? firstError.slice(prefix.length)
@@ -398,8 +438,101 @@ async function runSubagentWithFallback(
 	return fallbackOutcome;
 }
 
+/** Pin only the chosen public physical transport, never the parent's router. */
+async function createSubagentRuntime(
+	ctx: ExtensionContext,
+	model: Model<Api>,
+): Promise<ModelRuntime> {
+	const provider = ctx.modelRegistry.getProvider(model.provider);
+	if (!isPhysicalModel(model) || !provider) {
+		throw new Error(
+			`No configured parent provider for subagent model ${modelLabel(model)}. Choose an explicit physical model with a configured parent provider.`,
+		);
+	}
+	const runtime = await ModelRuntime.create({
+		credentials: new InMemoryCredentialStore(),
+		modelsStore: new InMemoryModelsStore(),
+		modelsPath: null,
+		refreshOnCreate: false,
+		allowModelNetwork: false,
+	});
+	// No default catalogs, ambient auth or paid transport can escape the pin.
+	for (const builtin of runtime.getProviders()) {
+		const disabled = {
+			id: builtin.id,
+			name: builtin.name,
+			auth: {
+				apiKey: {
+					name: "Unavailable in subagents",
+					resolve: async () => undefined,
+				},
+			},
+			getModels: () => [],
+			getAllModels: () => [],
+			stream: () => {
+				throw new Error("Default providers are unavailable in subagents.");
+			},
+			streamSimple: () => {
+				throw new Error("Default providers are unavailable in subagents.");
+			},
+		};
+		runtime.registerNativeProvider(disabled);
+	}
+	const assertChosen = (candidate: Model<Api>) => {
+		if (
+			!isPhysicalModel(candidate) ||
+			candidate.provider !== model.provider ||
+			candidate.id !== model.id ||
+			candidate.api !== model.api
+		) {
+			throw new Error("Subagents can stream only their chosen physical model.");
+		}
+	};
+	const physicalProvider = {
+		...provider,
+		// Parent-owned credentials/headers/OAuth stay behind its public auth API.
+		auth: {
+			apiKey: {
+				name: "Parent session",
+				resolve: async () => {
+					const resolved = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+					if (!resolved.ok) {
+						throw new Error(
+							`Cannot resolve parent authentication for ${modelLabel(model)}: ${resolved.error}`,
+						);
+					}
+					return {
+						auth: {
+							apiKey: resolved.apiKey,
+							headers: resolved.headers,
+							...(resolved.baseUrl ? { baseUrl: resolved.baseUrl } : {}),
+						},
+						env: resolved.env,
+					};
+				},
+			},
+		},
+		getModels: () => [model],
+		getAllModels: () => [model],
+		refreshModels: undefined,
+		filterModels: () => [model],
+		filterAllModels: () => [model],
+		stream: ((candidate, context, options) => {
+			assertChosen(candidate);
+			return provider.stream(candidate, context, options);
+		}) as typeof provider.stream,
+		streamSimple: ((candidate, context, options) => {
+			assertChosen(candidate);
+			return provider.streamSimple(candidate, context, options);
+		}) as typeof provider.streamSimple,
+	};
+	runtime.registerNativeProvider(physicalProvider);
+	return runtime;
+}
+
 async function runSubagentUnguarded(
 	opts: RunSubagentOptions,
+	settings: PhysicalSettings,
 ): Promise<SubagentOutcome> {
 	const { ctx, config, prompt, signal } = opts;
 	const createSession = opts.createSession ?? createAgentSession;
@@ -418,11 +551,16 @@ async function runSubagentUnguarded(
 	// fails, and so `onSession` can report the path alongside the session.
 	const sessionManager = buildSessionManager(ctx, opts);
 
+	// An explicit factory owns its transport; preserve that public injection seam.
+	const modelRuntime = opts.createSession
+		? undefined
+		: await createSubagentRuntime(ctx, settings.model);
 	const { session } = await createSession({
+		...(modelRuntime ? { modelRuntime } : {}),
 		cwd: ctx.cwd,
 		agentDir: getAgentDir(),
-		model: opts.model ?? ctx.model,
-		thinkingLevel: opts.thinkingLevel ?? ctx.thinkingLevel,
+		model: settings.model,
+		thinkingLevel: settings.thinkingLevel,
 		tools: config.tools ?? [...DEFAULT_SUBAGENT_TOOLS],
 		resourceLoader: loader,
 		sessionManager,

@@ -63,7 +63,7 @@ export type TurnLimitSession = Pick<
  * courtesy, and an abort that fails was almost certainly a session already on
  * its way out.
  */
-function attempt(action: () => Promise<void>): void {
+function attempt(action: () => Promise<unknown>): void {
 	try {
 		void action().catch(() => {});
 	} catch {

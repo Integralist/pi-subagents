@@ -49,7 +49,7 @@ export interface ControlDeps {
  * refuse before it ever returns a promise, and a caller holding a message to
  * display should not have to tell the two apart.
  */
-async function attempt(action: () => Promise<void>): Promise<ControlResult> {
+async function attempt(action: () => Promise<unknown>): Promise<ControlResult> {
 	try {
 		await action();
 		return { ok: true };

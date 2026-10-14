@@ -38,7 +38,13 @@ import { Type } from "typebox";
 import { type AgentConfig, discoverAgents } from "./agents.ts";
 import { steerSubagent, stopSubagent } from "./control.ts";
 import { assignHandle, parseMention } from "./mention.ts";
-import { modelLabel, resolveModel } from "./model-resolver.ts";
+import {
+	isPhysicalModel,
+	modelLabel,
+	type ResolvedSubagentSettings,
+	resolveModel,
+	resolveSubagentSettings,
+} from "./model-resolver.ts";
 import { resolveConcurrencyLimit, SubagentQueue } from "./queue.ts";
 import {
 	type SubagentRecord,
@@ -148,15 +154,20 @@ export interface SpawnToolDeps {
  */
 function candidateModels(ctx: ExtensionContext): readonly Model<Api>[] {
 	if (ctx.scopedModels.length > 0) {
-		return ctx.scopedModels.map((scoped) => scoped.model);
+		return ctx.scopedModels
+			.map((scoped) => scoped.model)
+			.filter(isPhysicalModel);
 	}
 
 	const available = ctx.modelRegistry.getAvailable();
-	return available.length > 0 ? available : ctx.modelRegistry.getAll();
+	return (available.length > 0 ? available : ctx.modelRegistry.getAll()).filter(
+		isPhysicalModel,
+	);
 }
 
 interface ModelChoice {
 	model?: Model<Api>;
+	resolved: ResolvedSubagentSettings;
 	/** Set when an ambiguous query was dismissed or an unavailable model fell back. */
 	fellBack: boolean;
 	fallbackReason?: string;
@@ -177,7 +188,17 @@ async function chooseModel(
 	requested: string | undefined,
 	signal: AbortSignal | undefined,
 	allowModelFallback = true,
+	thinkingLevel?: ThinkingLevel,
 ): Promise<ModelChoice> {
+	const accept = (choice: Omit<ModelChoice, "resolved">): ModelChoice => ({
+		...choice,
+		resolved: resolveSubagentSettings(
+			ctx,
+			choice.model,
+			thinkingLevel,
+			allowModelFallback,
+		),
+	});
 	const query = requested?.trim();
 	if (!query) {
 		if (!allowModelFallback) {
@@ -185,16 +206,39 @@ async function chooseModel(
 				"An explicit model is required when model fallback is disabled.",
 			);
 		}
-		return { fellBack: false };
+		return accept({ fellBack: false });
 	}
 
+	// An explicitly named router is not an unavailable physical model: do not
+	// quietly substitute one even when ordinary model fallback is allowed.
+	const virtualModels = (ctx.modelRegistry?.getAll?.() ?? []).filter(
+		(model) => !isPhysicalModel(model),
+	);
+	if (
+		virtualModels.some(
+			(model) => modelLabel(model).toLowerCase() === query.toLowerCase(),
+		)
+	)
+		throw new Error(
+			"Subagents require an explicit physical model, not a virtual model.",
+		);
 	const candidates = candidateModels(ctx);
 	const resolved = resolveModel(candidates, query);
 	if (resolved.ok) {
-		return { model: resolved.model, fellBack: false };
+		return accept({ model: resolved.model, fellBack: false });
 	}
 
 	if (resolved.reason === "unknown") {
+		// Bare IDs belong to the scoped physical resolver first. Only a query
+		// with no physical match can identify a virtual-only bare target.
+		if (
+			virtualModels.some(
+				(model) => model.id.toLowerCase() === query.toLowerCase(),
+			)
+		)
+			throw new Error(
+				"Subagents require an explicit physical model, not a virtual model.",
+			);
 		const availableList =
 			resolved.available.length > 0
 				? ` Available models: ${resolved.available.join(", ")}.`
@@ -203,11 +247,11 @@ async function chooseModel(
 		if (!allowModelFallback) {
 			throw new Error(`${reason} Model fallback is disabled.`);
 		}
-		return {
+		return accept({
 			model: undefined,
 			fellBack: true,
 			fallbackReason: reason,
-		};
+		});
 	}
 
 	// Ambiguous. Ask, when there is someone to ask: blocking on a dialog in a
@@ -228,13 +272,13 @@ async function chooseModel(
 		if (!allowModelFallback) {
 			throw new Error("No model was chosen. Model fallback is disabled.");
 		}
-		return { fellBack: true };
+		return accept({ fellBack: true });
 	}
 
-	return {
+	return accept({
 		model: candidates.find((model) => modelLabel(model) === picked),
 		fellBack: false,
-	};
+	});
 }
 
 /**
@@ -372,7 +416,6 @@ function describeStart(
 	unknownTools: string[],
 	choice: ModelChoice,
 	shadowed: AgentConfig | undefined,
-	ctx: ExtensionContext,
 ): string {
 	const parts: string[] = [];
 
@@ -390,7 +433,7 @@ function describeStart(
 		// Dismissing the dialog or requesting an unavailable model leaves the
 		// parent's model in play. Saying so keeps that from being an invisible
 		// decision.
-		const parentLabel = ctx.model ? ` (${modelLabel(ctx.model)})` : "";
+		const parentLabel = ` (${modelLabel(choice.resolved.model)})`;
 		parts.push(
 			choice.fallbackReason
 				? `Note: ${choice.fallbackReason} Falling back to the current model${parentLabel}.`
@@ -550,6 +593,7 @@ export function createNamedSpawnTool(deps: SpawnToolDeps) {
 					config.model,
 					signal,
 					config.allowModelFallback,
+					config.thinking,
 				);
 			} catch (error) {
 				return spawnRefusal(config.name, params.description, error);
@@ -566,6 +610,7 @@ export function createNamedSpawnTool(deps: SpawnToolDeps) {
 				prompt: params.prompt,
 				description: params.description,
 				model: choice.model,
+				resolved: choice.resolved,
 				thinkingLevel: config.thinking,
 				registry: deps.registry,
 				queue: deps.queue,
@@ -578,7 +623,7 @@ export function createNamedSpawnTool(deps: SpawnToolDeps) {
 				content: [
 					{
 						type: "text" as const,
-						text: describeStart(record, unknownTools, choice, undefined, ctx),
+						text: describeStart(record, unknownTools, choice, undefined),
 					},
 				],
 				details: {
@@ -705,6 +750,7 @@ export function createInlineSpawnTool(deps: SpawnToolDeps) {
 					params.model,
 					signal,
 					config.allowModelFallback,
+					config.thinking,
 				);
 			} catch (error) {
 				return spawnRefusal(config.name, params.description, error);
@@ -723,6 +769,7 @@ export function createInlineSpawnTool(deps: SpawnToolDeps) {
 				prompt: params.prompt,
 				description: params.description,
 				model: choice.model,
+				resolved: choice.resolved,
 				thinkingLevel: params.thinking as ThinkingLevel | undefined,
 				wakeOnFinish: params.wake_on_finish,
 				registry: deps.registry,
@@ -741,7 +788,6 @@ export function createInlineSpawnTool(deps: SpawnToolDeps) {
 							unknownTools,
 							choice,
 							shadowedFile(config, agents),
-							ctx,
 						),
 					},
 				],
@@ -1279,6 +1325,7 @@ async function route(
 			config.model,
 			ctx.signal,
 			config.allowModelFallback,
+			config.thinking,
 		);
 	} catch (error) {
 		say(`Cannot start "${handle}": ${describeCause(error)}`, "warning");
@@ -1294,6 +1341,7 @@ async function route(
 		config: config,
 		prompt: message,
 		model: choice.model,
+		resolved: choice.resolved,
 		thinkingLevel: config.thinking,
 		registry: deps.registry,
 		queue: deps.queue,

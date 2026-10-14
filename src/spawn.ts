@@ -29,6 +29,10 @@ import {
 	stopSubagent,
 } from "./control.ts";
 import { assignHandle } from "./mention.ts";
+import {
+	type ResolvedSubagentSettings,
+	resolveSubagentSettings,
+} from "./model-resolver.ts";
 import type { SubagentQueue } from "./queue.ts";
 import {
 	type SubagentRecord,
@@ -78,6 +82,7 @@ export interface SubagentRunOptions {
 	prompt: string;
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
+	resolved?: ResolvedSubagentSettings;
 	registry: SubagentRegistry;
 	/** Hands out the slots. Past the limit a subagent waits its turn. */
 	queue: SubagentQueue;
@@ -355,6 +360,7 @@ async function runAndAnnounce(
 			prompt,
 			model: opts.model,
 			thinkingLevel: opts.thinkingLevel,
+			resolved: opts.resolved,
 			sessionDir: opts.sessionDir,
 			resumeFrom,
 			// Deliberately no signal. The tool call that started this subagent is
@@ -367,7 +373,12 @@ async function runAndAnnounce(
 				// breaking the very work they exist to watch. A run nobody can report
 				// the context use of is still a run worth finishing.
 				try {
-					registry.update(record.id, { session, sessionFile });
+					registry.update(record.id, {
+						session,
+						sessionFile,
+						model: session.model?.id,
+						thinkingLevel: session.thinkingLevel,
+					});
 					stopWatching.push(
 						trackContextUsage(session, registry, record.id),
 						watchTurns(session, registry, record.id, turnLimit(opts.config)),
@@ -425,13 +436,17 @@ export function startSubagent(opts: StartSubagentOptions): SubagentRecord {
 		now = Date.now,
 	} = opts;
 
-	const resolvedModel = opts.model ?? opts.ctx.model;
-	const model =
-		resolvedModel?.id ??
-		(resolvedModel as unknown as { name?: string })?.name ??
-		opts.config.model;
-	const thinkingLevel =
-		opts.thinkingLevel ?? opts.config.thinking ?? opts.ctx.thinkingLevel;
+	const resolved =
+		opts.resolved ??
+		resolveSubagentSettings(
+			opts.ctx,
+			opts.model,
+			opts.thinkingLevel ?? config.thinking,
+			config.allowModelFallback,
+		);
+	const accepted = { ...opts, resolved };
+	const model = resolved.model.id;
+	const thinkingLevel = resolved.thinkingLevel;
 
 	const record: SubagentRecord = {
 		id: newId(),
@@ -460,7 +475,7 @@ export function startSubagent(opts: StartSubagentOptions): SubagentRecord {
 	registry.add(record);
 	queue.submit(record.id, () => {
 		registry.update(record.id, { status: "running" });
-		return runAndAnnounce(record, opts, run);
+		return runAndAnnounce(record, accepted, run);
 	});
 
 	return record;
@@ -492,17 +507,25 @@ export function resumeSubagent(opts: ResumeSubagentOptions): ResumeResult {
 	const stored = record.sessionFile;
 	const resumeFrom = stored && existsSync(stored) ? stored : undefined;
 
-	const resolvedModel = opts.model ?? opts.ctx.model;
-	const model =
-		resolvedModel?.id ??
-		(resolvedModel as unknown as { name?: string })?.name ??
-		opts.config.model ??
-		record.model;
-	const thinkingLevel =
-		opts.thinkingLevel ??
-		opts.config.thinking ??
-		opts.ctx.thinkingLevel ??
-		record.thinkingLevel;
+	let resolved: ResolvedSubagentSettings;
+	try {
+		resolved =
+			opts.resolved ??
+			resolveSubagentSettings(
+				opts.ctx,
+				opts.model,
+				opts.thinkingLevel ?? opts.config.thinking,
+				opts.config.allowModelFallback,
+			);
+	} catch (error) {
+		return {
+			ok: false,
+			reason: error instanceof Error ? error.message : String(error),
+		};
+	}
+	const accepted = { ...opts, resolved };
+	const model = resolved.model.id;
+	const thinkingLevel = resolved.thinkingLevel;
 
 	registry.update(record.id, {
 		config: opts.config,
@@ -526,7 +549,7 @@ export function resumeSubagent(opts: ResumeSubagentOptions): ResumeResult {
 
 	queue.submit(record.id, () => {
 		registry.update(record.id, { status: "running" });
-		return runAndAnnounce(record, opts, run, resumeFrom);
+		return runAndAnnounce(record, accepted, run, resumeFrom);
 	});
 
 	return { ok: true, record, startedFresh: resumeFrom === undefined };

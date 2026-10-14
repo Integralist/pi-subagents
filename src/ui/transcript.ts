@@ -14,7 +14,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ToolCall } from "@earendil-works/pi-ai";
 import {
 	AssistantMessageComponent,
 	type ToolDefinition,
@@ -78,18 +78,9 @@ function userText(message: AgentMessage): string {
 }
 
 /** The tool calls an assistant message made, in the order it made them. */
-function toolCalls(
-	message: AssistantMessage,
-): Array<{ id: string; name: string; arguments: Record<string, unknown> }> {
+function toolCalls(message: AssistantMessage): ToolCall[] {
 	return message.content.filter(
-		(
-			block,
-		): block is {
-			type: "toolCall";
-			id: string;
-			name: string;
-			arguments: Record<string, unknown>;
-		} => block.type === "toolCall",
+		(block): block is ToolCall => block.type === "toolCall",
 	);
 }
 

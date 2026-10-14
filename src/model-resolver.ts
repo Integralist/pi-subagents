@@ -7,7 +7,9 @@
  * of four would run the subagent on a model nobody chose.
  */
 
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export type ResolveModelResult =
 	| { ok: true; model: Model<Api> }
@@ -71,4 +73,95 @@ export function resolveModel(
 	}
 
 	return { ok: false, reason: "unknown", available: models.map(modelLabel) };
+}
+
+/** A subagent can run only physical models; virtual entries need their router. */
+export function isPhysicalModel(model: Model<Api>): boolean {
+	return model.api !== "pi-virtual";
+}
+
+export interface PhysicalSettings {
+	model: Model<Api>;
+	thinkingLevel?: ThinkingLevel;
+}
+
+/** Plain accepted settings, not a subscription to the main model's routing. */
+export interface ResolvedSubagentSettings extends PhysicalSettings {
+	explicitModel: boolean;
+	fallback?: PhysicalSettings;
+}
+
+const PHYSICAL_MODEL_REQUIRED =
+	"The main model's physical target is unknown. Choose an explicit physical model for this subagent.";
+
+/** Selection wins for physical models; virtual effort is never physical evidence. */
+function physicalMainSettings(
+	ctx: ExtensionContext,
+): PhysicalSettings | undefined {
+	if (!ctx.model) return undefined;
+	if (isPhysicalModel(ctx.model)) {
+		return { model: ctx.model, thinkingLevel: ctx.thinkingLevel };
+	}
+
+	// Both methods are public on the native host. Structural guards also keep
+	// physical-only hosts usable without assuming any native virtual-state API.
+	if (
+		typeof ctx.sessionManager?.getBranch !== "function" ||
+		typeof ctx.modelRegistry?.find !== "function"
+	)
+		return undefined;
+	const branch = ctx.sessionManager.getBranch();
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (entry?.type !== "message" || entry.message.role !== "assistant")
+			continue;
+		const message = entry.message;
+		if (!["stop", "length", "toolUse"].includes(message.stopReason)) continue;
+		if (message.api === "pi-virtual") continue;
+		const model = ctx.modelRegistry.find(message.provider, message.model);
+		if (!model || !isPhysicalModel(model)) return undefined;
+		const effort = (message as { thinkingLevel?: unknown }).thinkingLevel;
+		const thinkingLevel =
+			typeof effort === "string" &&
+			["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(
+				effort,
+			)
+				? (effort as ThinkingLevel)
+				: undefined;
+		return { model, thinkingLevel };
+	}
+	return undefined;
+}
+
+/** Resolve overrides independently and retain the strict explicit-model gate. */
+export function resolveSubagentSettings(
+	ctx: ExtensionContext,
+	model?: Model<Api>,
+	thinkingLevel?: ThinkingLevel,
+	allowModelFallback = true,
+): ResolvedSubagentSettings {
+	if (!allowModelFallback && !model) {
+		throw new Error(
+			"An explicit model is required when model fallback is disabled.",
+		);
+	}
+	if (model && !isPhysicalModel(model)) {
+		throw new Error(
+			"Subagents require an explicit physical model, not a virtual model.",
+		);
+	}
+	const parent = physicalMainSettings(ctx);
+	const physical = model ?? parent?.model;
+	if (!physical) throw new Error(PHYSICAL_MODEL_REQUIRED);
+	return {
+		model: physical,
+		thinkingLevel: thinkingLevel ?? parent?.thinkingLevel,
+		explicitModel: model !== undefined,
+		fallback: parent
+			? {
+					model: parent.model,
+					thinkingLevel: thinkingLevel ?? parent.thinkingLevel,
+				}
+			: undefined,
+	};
 }
