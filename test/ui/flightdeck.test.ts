@@ -103,8 +103,12 @@ describe("FlightdeckPane", () => {
 		const lines = raw.map(stripTerminalSequences);
 		const text = lines.join("\n");
 
+		expect(lines).toHaveLength(40);
 		for (const line of raw) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(66);
+		}
+		for (const line of lines) {
+			expect(line.startsWith("│ ")).toBe(true);
 		}
 		expect(text).toContain("FLIGHTDECK");
 		expect(text).toContain("Opus 4.6 · main");

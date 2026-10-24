@@ -569,17 +569,23 @@ export class FlightdeckPane implements Component {
 
 		const isWide =
 			state.layout === "wide" || (state.layout === "auto" && width >= 110);
-		const lines = isWide
-			? renderWide(state, agents, width, now, active, phase, this.#theme)
-			: renderDocked(state, agents, width, now, active, phase, this.#theme);
+		const innerW = Math.max(1, width - 2);
+		const rawLines = isWide
+			? renderWide(state, agents, innerW, now, active, phase, this.#theme)
+			: renderDocked(state, agents, innerW, now, active, phase, this.#theme);
 
+		let lines = rawLines;
 		if (this.#rows) {
 			const maxR = this.#rows();
-			if (maxR > 0 && lines.length > maxR) {
-				return lines.slice(0, maxR);
+			if (maxR > 0) {
+				lines = rawLines.slice(0, maxR);
+				while (lines.length < maxR) {
+					lines.push(" ".repeat(innerW));
+				}
 			}
 		}
-		return lines;
+		const leftBorder = `${this.#theme.fg("muted", "│")} `;
+		return lines.map((line) => truncateToWidth(`${leftBorder}${line}`, width));
 	}
 
 	invalidate(): void {}
