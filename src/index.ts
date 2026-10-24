@@ -32,7 +32,11 @@ import {
 	type Component,
 	Container,
 	Editor,
+	HStack,
+	isViewportTUI,
 	Text,
+	type TUI,
+	type ViewportTUI,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, discoverAgents } from "./agents.ts";
@@ -66,6 +70,19 @@ import {
 	stopFromUi,
 } from "./spawn.ts";
 import { DEFAULT_MAX_TURNS } from "./turns.ts";
+import { FlightdeckPane } from "./ui/flightdeck.ts";
+import {
+	appendLog,
+	completeTurn,
+	createFlightdeckState,
+	describeToolCall,
+	type FlightdeckLayout,
+	type FlightdeckState,
+	fmtDuration,
+	recordToolCall,
+	resetFlightdeckState,
+	startTurn,
+} from "./ui/flightdeck-state.ts";
 import { SubagentList } from "./ui/subagent-list.ts";
 import { SubagentViewer } from "./ui/subagent-viewer.ts";
 
@@ -89,6 +106,8 @@ const MAX_WAIT_MS = 10 * 60_000;
 /** Identifies the list widget to pi, so remounting replaces it rather than
  * stacking a second copy below the first. */
 export const SUBAGENT_LIST_WIDGET = "pi-subagents:list";
+/** Identifies the inline Flightdeck widget in regular TUI mode. */
+export const FLIGHTDECK_WIDGET = "pi-subagents:flightdeck";
 
 /**
  * Every effort level pi accepts, `off` included. A plain string `enum` rather
@@ -1411,6 +1430,284 @@ export default function (pi: ExtensionAPI): void {
 		}),
 	);
 
+	let flightdeckState: FlightdeckState = createFlightdeckState();
+	let flightdeckOpen = false;
+	let listHidden = false;
+	let activeTui: TUI | undefined;
+	let activeTheme: Theme | undefined;
+	let originalLayoutRoot: Component | undefined;
+	let splitRoot: HStack | undefined;
+	let railPhase = 0;
+	let railTimer: ReturnType<typeof setInterval> | undefined;
+	let turnSubagentBaseline = 0;
+	const seenSubagents = new Map<string, SubagentRecord["status"]>();
+
+	const syncContextVitals = (ctx: ExtensionContext): void => {
+		try {
+			const usage = ctx.getContextUsage?.();
+			flightdeckState = {
+				...flightdeckState,
+				model: ctx.model?.id ?? flightdeckState.model,
+				effort: ctx.thinkingLevel ?? flightdeckState.effort,
+				tokens: usage ? usage.tokens : flightdeckState.tokens,
+				contextWindow:
+					usage && usage.contextWindow > 0
+						? usage.contextWindow
+						: flightdeckState.contextWindow,
+				contextPercent: usage ? usage.percent : flightdeckState.contextPercent,
+			};
+		} catch {
+			// Context usage is optional across host modes.
+		}
+	};
+
+	const syncAnimationTimer = (): void => {
+		const active =
+			flightdeckOpen &&
+			(flightdeckState.isRunning || registry.running().length > 0);
+		if (active && !railTimer) {
+			railTimer = setInterval(() => {
+				railPhase += 1;
+				activeTui?.requestRender();
+			}, 110);
+			railTimer.unref?.();
+		} else if (!active && railTimer) {
+			clearInterval(railTimer);
+			railTimer = undefined;
+		}
+	};
+
+	registry.onChange(() => {
+		const now = Date.now();
+		for (const rec of registry.list()) {
+			const prev = seenSubagents.get(rec.id);
+			if (prev === undefined) {
+				seenSubagents.set(rec.id, rec.status);
+				flightdeckState = appendLog(flightdeckState, {
+					at: rec.startedAt || now,
+					who: rec.handle,
+					text: rec.description || `spawned ${rec.type}`,
+					kind: "info",
+					agentId: rec.id,
+				});
+			} else if (prev !== rec.status) {
+				seenSubagents.set(rec.id, rec.status);
+				if (TERMINAL_STATUSES.has(rec.status)) {
+					const took = fmtDuration((rec.finishedAt ?? now) - rec.startedAt);
+					flightdeckState = appendLog(flightdeckState, {
+						at: rec.finishedAt ?? now,
+						who: rec.handle,
+						text:
+							rec.status === "completed"
+								? `done · ${took}`
+								: `${rec.status} · ${took}`,
+						kind: rec.status === "completed" ? "done" : "error",
+						agentId: rec.id,
+					});
+				}
+			}
+		}
+		syncAnimationTimer();
+		activeTui?.requestRender();
+	});
+
+	pi.on("turn_start", (_event, ctx) => {
+		syncContextVitals(ctx);
+		turnSubagentBaseline = registry.list().length;
+		flightdeckState = startTurn(flightdeckState, Date.now());
+		syncAnimationTimer();
+		activeTui?.requestRender();
+	});
+
+	pi.on("tool_execution_end", (event) => {
+		const raw = event as unknown as Record<string, unknown>;
+		const toolName = typeof raw.toolName === "string" ? raw.toolName : "tool";
+		const args = raw.args ?? raw.input;
+		const isError = Boolean(raw.isError);
+		const lower = toolName.toLowerCase();
+		const isEdit = lower === "edit" || lower === "write";
+		flightdeckState = recordToolCall(flightdeckState, { isEdit, isError });
+		if (isEdit || isError) {
+			flightdeckState = appendLog(flightdeckState, {
+				at: Date.now(),
+				who: "main",
+				text: describeToolCall(toolName, args),
+				kind: isError ? "error" : "info",
+				agentId: null,
+			});
+		}
+		activeTui?.requestRender();
+	});
+
+	pi.on("turn_end", (event, ctx) => {
+		syncContextVitals(ctx);
+		const raw = event as unknown as Record<string, unknown>;
+		const msg = raw.message as Record<string, unknown> | undefined;
+		const usage = msg?.usage as Record<string, unknown> | undefined;
+		const costObj = usage?.cost as Record<string, unknown> | undefined;
+		const addedCost =
+			typeof costObj?.total === "number"
+				? costObj.total
+				: typeof usage?.costUsd === "number"
+					? usage.costUsd
+					: 0;
+		if (addedCost > 0) {
+			flightdeckState = {
+				...flightdeckState,
+				costUsd: flightdeckState.costUsd + addedCost,
+			};
+		}
+		const spawned = Math.max(0, registry.list().length - turnSubagentBaseline);
+		flightdeckState = completeTurn(flightdeckState, {
+			endedAt: Date.now(),
+			agentsSpawned: spawned,
+			reason: msg?.stopReason === "error" ? "error" : "answer",
+		});
+		syncAnimationTimer();
+		activeTui?.requestRender();
+	});
+
+	pi.on("session_before_compact", () => {
+		flightdeckState = {
+			...flightdeckState,
+			compactions: flightdeckState.compactions + 1,
+		};
+		activeTui?.requestRender();
+	});
+
+	const unmountFlightdeck = (ctx: ExtensionContext): void => {
+		if (
+			activeTui &&
+			isViewportTUI(activeTui) &&
+			originalLayoutRoot !== undefined
+		) {
+			activeTui.setLayoutRoot(originalLayoutRoot);
+		}
+		splitRoot = undefined;
+		originalLayoutRoot = undefined;
+		ctx.ui.setWidget?.(FLIGHTDECK_WIDGET, undefined);
+	};
+
+	const mountFlightdeck = (ctx: ExtensionContext): void => {
+		syncContextVitals(ctx);
+		if (activeTui && activeTheme && isViewportTUI(activeTui)) {
+			const viewportTui = activeTui as ViewportTUI & {
+				layoutRoot?: Component;
+			};
+			if (!splitRoot && viewportTui.layoutRoot) {
+				originalLayoutRoot = viewportTui.layoutRoot;
+				const pane = new FlightdeckPane({
+					registry,
+					getState: () => flightdeckState,
+					theme: activeTheme,
+					placement: "docked",
+					rows: () => Math.max(12, activeTui?.terminal.rows ?? 40),
+					railPhase: () => railPhase,
+				});
+				splitRoot = new HStack(
+					[
+						{ component: originalLayoutRoot, basis: 0, grow: 1 },
+						{
+							component: pane,
+							basis: 56,
+							minSize: 36,
+							maxSize: 68,
+							visible: (vp) => vp.width >= 100,
+						},
+					],
+					{ gap: 1 },
+				);
+				viewportTui.setLayoutRoot(splitRoot);
+			}
+			ctx.ui.setWidget?.(FLIGHTDECK_WIDGET, undefined);
+			return;
+		}
+
+		ctx.ui.setWidget?.(
+			FLIGHTDECK_WIDGET,
+			(_tui, theme) =>
+				new FlightdeckPane({
+					registry,
+					getState: () => flightdeckState,
+					theme,
+					placement: "inline",
+					railPhase: () => railPhase,
+				}),
+			{ placement: "aboveEditor" },
+		);
+	};
+
+	pi.registerCommand?.("flightdeck", {
+		description:
+			"Open or configure the Flightdeck dashboard (open, hide, hide-list, show-list, reset, layout, expand)",
+		handler: async (rawArgs, ctx) => {
+			const tokens = rawArgs.trim().split(/\s+/).filter(Boolean);
+			const sub = (tokens[0] ?? "open").toLowerCase();
+
+			if (sub === "hide" || sub === "close") {
+				flightdeckOpen = false;
+				unmountFlightdeck(ctx);
+				syncAnimationTimer();
+				activeTui?.requestRender();
+				return;
+			}
+
+			if (sub === "hide-list") {
+				listHidden = true;
+				activeTui?.requestRender();
+				return;
+			}
+
+			if (sub === "show-list") {
+				listHidden = false;
+				activeTui?.requestRender();
+				return;
+			}
+
+			if (sub === "reset") {
+				flightdeckState = resetFlightdeckState(flightdeckState, Date.now());
+				activeTui?.requestRender();
+				return;
+			}
+
+			if (sub === "layout") {
+				const mode = (tokens[1] ?? "auto").toLowerCase();
+				const valid: FlightdeckLayout =
+					mode === "compact" || mode === "wide" || mode === "mini"
+						? mode
+						: "auto";
+				flightdeckState = { ...flightdeckState, layout: valid };
+				activeTui?.requestRender();
+				return;
+			}
+
+			const expandTarget =
+				sub === "expand" ? tokens[1] : /^[1-9]$/.test(sub) ? sub : undefined;
+			if (expandTarget && /^[1-9]$/.test(expandTarget)) {
+				const idx = Number.parseInt(expandTarget, 10) - 1;
+				const visible = registry
+					.list()
+					.filter((r) => r.startedAt >= flightdeckState.resetAfterAt);
+				const target = visible[idx];
+				flightdeckState = {
+					...flightdeckState,
+					expandedAgentId:
+						target && flightdeckState.expandedAgentId !== target.id
+							? target.id
+							: null,
+				};
+				activeTui?.requestRender();
+				return;
+			}
+
+			flightdeckOpen = true;
+			unmountFlightdeck(ctx);
+			mountFlightdeck(ctx);
+			syncAnimationTimer();
+			activeTui?.requestRender();
+		},
+	});
+
 	// The list is a terminal widget, so it is mounted once the session is up and
 	// only when there is a terminal to mount it in. `print`, `json` and `rpc`
 	// runs have no editor to sit below and nothing to redraw.
@@ -1419,6 +1716,7 @@ export default function (pi: ExtensionAPI): void {
 			return;
 		}
 
+		syncContextVitals(ctx);
 		let viewerOpen = false;
 
 		/**
@@ -1472,11 +1770,14 @@ export default function (pi: ExtensionAPI): void {
 			SUBAGENT_LIST_WIDGET,
 			// Built per mount rather than once: the theme arrives here, and a theme
 			// change remounts the widget with the new one.
-			(tui, theme) =>
-				new SubagentList({
+			(tui, theme) => {
+				activeTui = tui;
+				activeTheme = theme;
+				return new SubagentList({
 					registry,
 					theme,
 					isViewerOpen: () => viewerOpen,
+					isHidden: () => listHidden,
 					requestRender: () => tui.requestRender(),
 					// The list never holds focus, so an input listener is the only way
 					// arrow keys reach it. It reads the prompt to decide whether an
@@ -1524,7 +1825,8 @@ export default function (pi: ExtensionAPI): void {
 							},
 						);
 					},
-				}),
+				});
+			},
 			{ placement: "belowEditor" },
 		);
 	});

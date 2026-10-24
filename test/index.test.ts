@@ -8,6 +8,7 @@ import type {
 	Theme,
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { type Component, stripTerminalSequences } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agents.ts";
 import { PALETTE } from "../src/colors.ts";
@@ -2297,5 +2298,172 @@ describe("compact tool results", () => {
 		expect(draw(tool, result, true).join("\n")).toContain(
 			"Refusal: name must not be blank",
 		);
+	});
+});
+
+describe("/flightdeck command and split-pane mounting", () => {
+	it("docks beside the fullscreen layoutRoot in an HStack, keeps bottom list visible by default, and supports hide-list, show-list, reset, layout, and hide", async () => {
+		const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
+		const commands = new Map<
+			string,
+			{
+				description: string;
+				handler: (args: string, ctx: ExtensionContext) => Promise<void> | void;
+			}
+		>();
+		const widgets = new Map<
+			string,
+			{ factory: unknown; options?: { placement?: string } }
+		>();
+
+		const pi = {
+			registerTool: vi.fn(),
+			registerMessageRenderer: vi.fn(),
+			registerCommand: vi.fn((name: string, cmd: never) => {
+				commands.set(name, cmd);
+			}),
+			on: vi.fn((event: string, handler: (...args: unknown[]) => unknown) => {
+				const list = handlers.get(event) ?? [];
+				list.push(handler);
+				handlers.set(event, list);
+			}),
+			sendMessage: vi.fn(),
+			getAllTools: () => [],
+		} as unknown as ExtensionAPI;
+
+		extension(pi);
+		expect(commands.has("flightdeck")).toBe(true);
+
+		const originalRoot: Component = {
+			render: (w: number) => [`chat-${w}`],
+			invalidate: () => {},
+		};
+		let currentRoot: Component | undefined = originalRoot;
+		const fakeTui = {
+			[Symbol.for("@earendil-works/pi-tui/viewport")]: true,
+			mode: "fullscreen",
+			terminal: { rows: 40, columns: 140 },
+			get layoutRoot() {
+				return currentRoot;
+			},
+			setLayoutRoot: vi.fn((root: Component | undefined) => {
+				currentRoot = root;
+			}),
+			requestRender: vi.fn(),
+			addInputListener: vi.fn(() => () => {}),
+			hasOverlay: () => false,
+			getFocusedComponent: () => null,
+		};
+
+		const plainTheme = {
+			fg: (_c: string, t: string) => t,
+			bg: (_c: string, t: string) => t,
+			bold: (t: string) => t,
+		} as unknown as Theme;
+
+		let mountedList: Component | undefined;
+		let mountedInline: Component | undefined;
+		const ctx = {
+			mode: "tui",
+			cwd: "/tmp/project",
+			model: { provider: "anthropic", id: "claude-opus-4-6", name: "Opus 4.6" },
+			thinkingLevel: "medium",
+			getContextUsage: () => ({
+				tokens: 50_000,
+				contextWindow: 200_000,
+				percent: 25,
+			}),
+			ui: {
+				notify: vi.fn(),
+				getEditorText: () => "",
+				setWidget: vi.fn(
+					(
+						key: string,
+						factory: ((tui: never, theme: Theme) => Component) | undefined,
+						options?: { placement?: string },
+					) => {
+						if (!factory) {
+							widgets.delete(key);
+							if (key !== SUBAGENT_LIST_WIDGET) {
+								mountedInline = undefined;
+							}
+							return;
+						}
+						widgets.set(key, { factory, options });
+						const comp = factory(fakeTui as never, plainTheme);
+						if (key === SUBAGENT_LIST_WIDGET) {
+							mountedList = comp;
+						} else {
+							mountedInline = comp;
+						}
+					},
+				),
+			},
+		} as unknown as ExtensionContext;
+
+		for (const fn of handlers.get("session_start") ?? []) {
+			await fn({}, ctx);
+		}
+		expect(mountedList).toBeDefined();
+
+		// Simulate a main turn and tool edit before opening Flightdeck
+		for (const fn of handlers.get("turn_start") ?? []) {
+			await fn({}, ctx);
+		}
+		for (const fn of handlers.get("tool_execution_end") ?? []) {
+			await fn(
+				{ toolName: "edit", args: { path: "src/index.ts" }, isError: false },
+				ctx,
+			);
+		}
+		for (const fn of handlers.get("turn_end") ?? []) {
+			await fn(
+				{ message: { role: "assistant", usage: { cost: { total: 0.25 } } } },
+				ctx,
+			);
+		}
+
+		const cmd = commands.get("flightdeck");
+		expect(cmd).toBeDefined();
+		await cmd?.handler("", ctx);
+
+		// Fullscreen mode wraps originalRoot in an HStack via setLayoutRoot
+		expect(fakeTui.setLayoutRoot).toHaveBeenCalled();
+		expect(currentRoot).not.toBe(originalRoot);
+		const splitLines =
+			currentRoot?.render(140).map(stripTerminalSequences) ?? [];
+		const splitText = splitLines.join("\n");
+		expect(splitText).toContain("FLIGHTDECK");
+		expect(splitText).toContain("Opus 4.6 · main");
+		expect(splitText).toContain("edit → src/index.ts");
+		// And the chat column on the left is rendered narrower than 140 columns
+		expect(splitText).toContain("chat-83");
+
+		// Bottom list hides on /flightdeck hide-list and restores on /flightdeck show-list
+		await cmd?.handler("hide-list", ctx);
+		expect(mountedList?.render(80)).toEqual([]);
+
+		await cmd?.handler("show-list", ctx);
+		await cmd?.handler("layout wide", ctx);
+		await cmd?.handler("reset", ctx);
+		expect(
+			currentRoot?.render(140).map(stripTerminalSequences).join("\n"),
+		).not.toContain("edit → src/index.ts");
+
+		await cmd?.handler("hide", ctx);
+		expect(currentRoot).toBe(originalRoot);
+
+		// Regular mode mounts inline aboveEditor widget
+		fakeTui.mode = "regular";
+		delete (fakeTui as Record<symbol, unknown>)[
+			Symbol.for("@earendil-works/pi-tui/viewport")
+		];
+		await cmd?.handler("", ctx);
+		expect(mountedInline).toBeDefined();
+		expect(
+			mountedInline?.render(80).map(stripTerminalSequences).join("\n"),
+		).toContain("Opus 4.6");
+		await cmd?.handler("close", ctx);
+		expect(mountedInline).toBeUndefined();
 	});
 });
