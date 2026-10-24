@@ -376,6 +376,57 @@ describe("trackContextUsage", () => {
 
 		expect(listener).toHaveBeenCalledTimes(1);
 	});
+
+	it("tracks contextTokens, outputTokens, and last 3 tool calls from child session events", () => {
+		const registry = new SubagentRegistry();
+		registry.add(
+			record("sub-metrics", {
+				handle: "explore",
+			}),
+		);
+
+		let listener: ((event: unknown) => void) | undefined;
+		const session = {
+			subscribe: (fn: (event: unknown) => void) => {
+				listener = fn;
+				return () => {};
+			},
+			getContextUsage: () => ({
+				tokens: 14_200,
+				contextWindow: 200_000,
+				percent: 7.1,
+			}),
+		};
+
+		trackContextUsage(session as never, registry, "sub-metrics");
+
+		for (let i = 1; i <= 4; i++) {
+			listener?.({
+				type: "tool_execution_end",
+				toolName: "read",
+				args: { path: `src/file-${i}.ts` },
+				isError: i === 4,
+			});
+		}
+		listener?.({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				usage: { output: 350 },
+			},
+		});
+		listener?.({ type: "turn_end" });
+
+		const updated = registry.get("sub-metrics");
+		expect(updated?.contextPercent).toBe(7.1);
+		expect(updated?.contextTokens).toBe(14_200);
+		expect(updated?.outputTokens).toBe(350);
+		expect(updated?.toolCalls).toEqual([
+			{ text: "read → src/file-2.ts", isError: false },
+			{ text: "read → src/file-3.ts", isError: false },
+			{ text: "read → src/file-4.ts", isError: true },
+		]);
+	});
 });
 
 describe("whenFinished", () => {

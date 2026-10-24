@@ -14,6 +14,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "./agents.ts";
 import type { SubagentOutcome } from "./runner.ts";
+import { describeToolCall, type ToolNote } from "./ui/flightdeck-state.ts";
 
 /**
  * Where a subagent is in its life.
@@ -118,6 +119,12 @@ export interface SubagentRecord {
 	 * Null is not zero, and the list renders it blank rather than `0%`.
 	 */
 	contextPercent: number | null;
+	/** Estimated context tokens from the latest turn, when reported. */
+	contextTokens?: number | null;
+	/** Cumulative output tokens produced across assistant messages. */
+	outputTokens?: number;
+	/** Most recent tool calls (up to 3) for Flightdeck cards and expanded views. */
+	toolCalls?: ToolNote[];
 	turns: number;
 	/** Model name or id used by this subagent. */
 	model?: string;
@@ -450,20 +457,28 @@ export type ContextUsageSource = Pick<
  * threw. All become null, which renders as a blank. Zero would be a lie: it
  * says the context is empty when the truth is that nobody knows.
  */
-function readContextPercent(session: ContextUsageSource): number | null {
+function readContextSnapshot(session: ContextUsageSource): {
+	percent: number | null;
+	tokens: number | null;
+} {
 	try {
-		return session.getContextUsage()?.percent ?? null;
+		const usage = session.getContextUsage();
+		return {
+			percent: usage?.percent ?? null,
+			tokens: usage?.tokens ?? null,
+		};
 	} catch {
-		return null;
+		return { percent: null, tokens: null };
 	}
 }
 
 /**
- * Keep one record's context reading current for as long as its subagent runs.
+ * Keep one record's context reading, output tokens, and recent tool calls
+ * current for as long as its subagent runs.
  *
- * The reading is taken at `turn_end` because that is when the provider has just
- * reported its token usage; sampling at any other event would re-read a figure
- * that has not moved.
+ * The context reading is taken at `turn_end` because that is when the provider
+ * has just reported its token usage; sampling at any other event would re-read
+ * a figure that has not moved.
  *
  * The listener runs inside the child session's own event dispatch, so it must
  * not throw — an exception here would surface in the host's session rather than
@@ -479,12 +494,54 @@ export function trackContextUsage(
 	idOrHandle: string,
 ): () => void {
 	return session.subscribe((event) => {
-		if (event.type !== "turn_end") {
-			return;
-		}
+		try {
+			const raw = event as unknown as Record<string, unknown>;
+			if (raw.type === "tool_execution_end") {
+				const current = registry.get(idOrHandle);
+				if (!current) {
+					return;
+				}
+				const toolName =
+					typeof raw.toolName === "string" ? raw.toolName : "tool";
+				const args = raw.args ?? raw.input;
+				const note: ToolNote = {
+					text: describeToolCall(toolName, args),
+					isError: Boolean(raw.isError),
+				};
+				const toolCalls = [...(current.toolCalls ?? []), note].slice(-3);
+				registry.update(idOrHandle, { toolCalls });
+				return;
+			}
 
-		registry.update(idOrHandle, {
-			contextPercent: readContextPercent(session),
-		});
+			if (raw.type === "message_end") {
+				const current = registry.get(idOrHandle);
+				const msg = raw.message as Record<string, unknown> | undefined;
+				const usage = msg?.usage as Record<string, unknown> | undefined;
+				const out =
+					typeof usage?.output === "number"
+						? usage.output
+						: typeof usage?.outputTokens === "number"
+							? usage.outputTokens
+							: 0;
+				if (current && msg?.role === "assistant" && out > 0) {
+					registry.update(idOrHandle, {
+						outputTokens: (current.outputTokens ?? 0) + out,
+					});
+				}
+				return;
+			}
+
+			if (event.type !== "turn_end") {
+				return;
+			}
+
+			const snapshot = readContextSnapshot(session);
+			registry.update(idOrHandle, {
+				contextPercent: snapshot.percent,
+				contextTokens: snapshot.tokens,
+			});
+		} catch {
+			// Never throw inside child session event dispatch.
+		}
 	});
 }
