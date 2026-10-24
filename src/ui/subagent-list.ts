@@ -78,6 +78,8 @@ export interface SubagentListOptions {
 	getEditorText?: () => string;
 	/** Whether the subagent viewer is open, in which case the list is hidden. */
 	isViewerOpen?: () => boolean;
+	/** Whether the list is explicitly hidden. */
+	isHidden?: () => boolean;
 	/**
 	 * Whether the prompt editor currently holds focus.
 	 *
@@ -254,6 +256,7 @@ export class SubagentList implements Component {
 		| undefined;
 	readonly #onStop: ((record: SubagentRecord) => void) | undefined;
 	readonly #isViewerOpen: (() => boolean) | undefined;
+	readonly #isHidden: (() => boolean) | undefined;
 	readonly #isEditorFocused: (() => boolean) | undefined;
 	/** True while an opened subagent's view is on screen and holding the keys. */
 	#viewing = false;
@@ -286,6 +289,7 @@ export class SubagentList implements Component {
 		this.#onOpen = options.onOpen;
 		this.#onStop = options.onStop;
 		this.#isViewerOpen = options.isViewerOpen;
+		this.#isHidden = options.isHidden;
 		this.#isEditorFocused = options.isEditorFocused;
 
 		if (options.requestRender) {
@@ -387,7 +391,7 @@ export class SubagentList implements Component {
 	}
 
 	render(width: number): string[] {
-		if (this.#isViewerOpen?.()) {
+		if (this.#isViewerOpen?.() || this.#isHidden?.()) {
 			return [];
 		}
 
@@ -497,7 +501,7 @@ export class SubagentList implements Component {
 		// list's input listener is consulted before the focused view, so a key
 		// taken here would act on the list instead — escape would leave the list
 		// and the view would never close.
-		if (this.#viewing || this.#isViewerOpen?.()) {
+		if (this.#viewing || this.#isViewerOpen?.() || this.#isHidden?.()) {
 			return false;
 		}
 

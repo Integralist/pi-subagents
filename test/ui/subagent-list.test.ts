@@ -153,6 +153,32 @@ describe("SubagentList", () => {
 		expect(subject.render(80)).toEqual([]);
 	});
 
+	it("hides rows and ignores keys when isHidden returns true", () => {
+		addRunning(2);
+		let hidden = true;
+		const opened: SubagentRecord[] = [];
+		const subject = new SubagentList({
+			registry,
+			theme: plainTheme,
+			now: () => clock,
+			getEditorText: () => "",
+			isEditorFocused: () => true,
+			isHidden: () => hidden,
+			onOpen: (rec) => {
+				opened.push(rec);
+			},
+		});
+
+		expect(subject.render(80)).toEqual([]);
+		expect(subject.handleKey("\x1b[B")).toBe(false);
+		expect(subject.handleKey("\r")).toBe(false);
+		expect(opened).toHaveLength(0);
+
+		hidden = false;
+		expect(subject.render(80).filter(Boolean)).toHaveLength(2);
+		expect(subject.handleKey("\x1b[B")).toBe(true);
+	});
+
 	/**
 	 * Null is not zero. Before the first turn ends, and again just after a
 	 * compaction, nobody knows the figure — and `0%` would claim an empty context
